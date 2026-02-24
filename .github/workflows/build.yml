@@ -36,6 +36,7 @@ jobs:
         --clean 
         --name "FlowchartCreationMiya-v1.0.0" 
         --add-data "README.md;."
+        --collect-all PyQt6
         app.pyw
 
     # 完成したexeファイルをGitHub上にアップロード
