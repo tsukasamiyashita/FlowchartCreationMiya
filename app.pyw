@@ -6,7 +6,7 @@ import math
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsScene, QGraphicsView, 
                              QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, 
                              QToolBar, QFileDialog, QInputDialog, QMessageBox,
-                             QGraphicsItem, QGraphicsEllipseItem, QColorDialog, QLabel, QWidget)
+                             QGraphicsItem, QGraphicsEllipseItem, QColorDialog, QLabel, QWidget, QStyle)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QPainterPath, 
                          QTransform, QPainterPathStroker, QAction, QActionGroup)
@@ -20,20 +20,17 @@ class FlowchartView(QGraphicsView):
     def __init__(self, scene):
         super().__init__(scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # ズーム時に「マウスカーソルのある位置」を中心に拡大縮小する設定
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.zoom_factor = 1.15
 
     def wheelEvent(self, event):
-        # Ctrlキーを押しながらホイールを回したときだけズームする
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             if event.angleDelta().y() > 0:
                 self.scale(self.zoom_factor, self.zoom_factor)
             else:
                 self.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
         else:
-            # それ以外は通常のスクロール（上下移動）
             super().wheelEvent(event)
 
 
@@ -48,6 +45,7 @@ class NodeItem(QGraphicsPathItem):
         self.bg_color = QColor(bg_color)
         self.text_color = QColor(text_color)
         self.default_pen = QPen(Qt.GlobalColor.black, 2)
+        self._is_highlighted = False
 
         path = QPainterPath()
         if self.node_type == "process":
@@ -77,7 +75,8 @@ class NodeItem(QGraphicsPathItem):
                       QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
                       QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         
-        self.text_item = QGraphicsTextItem(text, self)
+        self.text_item = QGraphicsTextItem(text)
+        self.text_item.setParentItem(self)
         self.text_item.setDefaultTextColor(self.text_color)
         self.set_text(text)
 
@@ -101,11 +100,9 @@ class NodeItem(QGraphicsPathItem):
         self.text_item.setDefaultTextColor(self.text_color)
 
     def set_highlight(self, active: bool):
-        if active:
-            highlight_pen = QPen(QColor("#FF5722"), 3, Qt.PenStyle.DashLine)
-            self.setPen(highlight_pen)
-        else:
-            self.setPen(self.default_pen)
+        if self._is_highlighted != active:
+            self._is_highlighted = active
+            self.update() 
 
     def add_edge(self, edge):
         self.edges.append(edge)
@@ -122,6 +119,17 @@ class NodeItem(QGraphicsPathItem):
                 edge.update_position()
                 
         return super().itemChange(change, value)
+
+    def paint(self, painter, option, widget=None):
+        if self._is_highlighted:
+            painter.setPen(QPen(QColor("#FF5722"), 3, Qt.PenStyle.DashLine))
+        elif self.isSelected():
+            painter.setPen(QPen(QColor("#3B82F6"), 3))
+        else:
+            painter.setPen(self.default_pen)
+            
+        painter.setBrush(self.brush())
+        painter.drawPath(self.path())
 
     def mouseDoubleClickEvent(self, event):
         current_text = self.text_item.toPlainText()
@@ -158,6 +166,14 @@ class WaypointItem(QGraphicsEllipseItem):
             
         return super().itemChange(change, value)
 
+    def paint(self, painter, option, widget=None):
+        if self.isSelected():
+            painter.setPen(QPen(QColor("#3B82F6"), 2))
+        else:
+            painter.setPen(self.pen())
+        painter.setBrush(self.brush())
+        painter.drawEllipse(self.rect())
+
     def mouseDoubleClickEvent(self, event):
         self.edge.remove_waypoint(self)
         super().mouseDoubleClickEvent(event)
@@ -166,6 +182,58 @@ class WaypointItem(QGraphicsEllipseItem):
         super().mouseReleaseEvent(event)
         self.ungrabMouse()
         self.edge.check_waypoint_straightness(self)
+
+
+class EdgeTextItem(QGraphicsTextItem):
+    """エッジのラベルとして機能し、自由にドラッグ可能なテキストアイテム"""
+    def __init__(self, text, edge):
+        super().__init__(text)
+        self.edge = edge
+        # 移動、選択を許可する
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | 
+                      QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | 
+                      QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        self.setParentItem(edge)
+        self.setDefaultTextColor(QColor("#333333"))
+        
+        # ユーザーがドラッグして設定したオフセット (Noneの場合は自動配置)
+        self.manual_offset = None
+        self._is_dragging = False
+
+    def mousePressEvent(self, event):
+        self._is_dragging = True
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._is_dragging = False
+        super().mouseReleaseEvent(event)
+
+    def itemChange(self, change, value):
+        # ユーザーがドラッグして位置を動かした場合、基準位置からのオフセットを記録する
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self._is_dragging:
+            base_pos = self.edge.get_auto_text_pos()
+            if base_pos is not None:
+                self.manual_offset = value - base_pos
+        return super().itemChange(change, value)
+
+    def mouseDoubleClickEvent(self, event):
+        # テキストアイテムのダブルクリックで編集
+        new_text, ok = QInputDialog.getMultiLineText(
+            None, "エッジのテキスト編集", "線上のテキスト (複数行入力可):", self.edge.raw_text
+        )
+        if ok:
+            self.edge.set_text(new_text)
+
+    def paint(self, painter, option, widget=None):
+        # デフォルトのダサい点線枠を消す
+        option.state &= ~QStyle.StateFlag.State_Selected
+        super().paint(painter, option, widget)
+        
+        # 選択時には移動可能であることを分かりやすくするため、薄い青枠を表示
+        if self.isSelected():
+            painter.setPen(QPen(QColor("#3B82F6"), 1, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.boundingRect())
 
 
 class EdgeItem(QGraphicsPathItem):
@@ -180,14 +248,13 @@ class EdgeItem(QGraphicsPathItem):
         self._drag_start_pos = None
         self._potential_waypoint_index = -1
         
-        pen = QPen(Qt.GlobalColor.black, 2)
-        self.setPen(pen)
+        self.default_pen = QPen(Qt.GlobalColor.black, 2)
+        self.setPen(self.default_pen)
         self.setZValue(-1)
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         
-        self.text_item = QGraphicsTextItem(self)
-        self.text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self.text_item.setDefaultTextColor(QColor("#333333"))
+        # カスタムテキストアイテムを作成
+        self.text_item = EdgeTextItem("", self)
         
         self._set_label_html(label)
         self.update_position()
@@ -214,7 +281,40 @@ class EdgeItem(QGraphicsPathItem):
         self._set_label_html(text)
         self.update_position()
 
+    def get_auto_text_pos(self):
+        """テキストのデフォルト（自動）配置位置を計算して返す"""
+        if not self.source_node or not self.target_node:
+            return None
+        pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
+        if len(pts) < 2: return None
+        
+        mid_idx = len(pts) // 2
+        p1 = pts[mid_idx - 1]
+        p2 = pts[mid_idx]
+        
+        line = QLineF(p1, p2)
+        center = line.center()
+        rect = self.text_item.boundingRect()
+        
+        dx = line.dx()
+        dy = line.dy()
+        length = line.length()
+        
+        if length > 0:
+            nx = dy / length
+            ny = -dx / length
+            offset = 15
+            target_x = center.x() + nx * offset - rect.width() / 2
+            target_y = center.y() + ny * offset - rect.height() / 2
+            return QPointF(target_x, target_y)
+        return QPointF(center.x() - rect.width() / 2, center.y() - rect.height() / 2)
+
     def update_position(self):
+        if not self.source_node or not self.target_node:
+            return
+        
+        self.prepareGeometryChange()
+            
         pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
         
         path = QPainterPath()
@@ -224,38 +324,32 @@ class EdgeItem(QGraphicsPathItem):
         self.setPath(path)
         
         if self.raw_text:
-            mid_idx = len(pts) // 2
-            p1 = pts[mid_idx - 1]
-            p2 = pts[mid_idx]
-            
-            line = QLineF(p1, p2)
-            center = line.center()
-            rect = self.text_item.boundingRect()
-            
-            dx = line.dx()
-            dy = line.dy()
-            length = line.length()
-            
-            if length > 0:
-                nx = dy / length
-                ny = -dx / length
-                offset = 15
-                target_x = center.x() + nx * offset
-                target_y = center.y() + ny * offset
-                self.text_item.setPos(target_x - rect.width() / 2, target_y - rect.height() / 2)
+            base_pos = self.get_auto_text_pos()
+            if base_pos is not None:
+                # 手動で移動されたオフセットがある場合はそれを足す
+                if self.text_item.manual_offset is not None:
+                    self.text_item.setPos(base_pos + self.text_item.manual_offset)
+                else:
+                    self.text_item.setPos(base_pos)
 
     def paint(self, painter, option, widget=None):
-        super().paint(painter, option, widget)
         if self.isSelected():
-            painter.setPen(QPen(QColor("#FF9800"), 1))
-            painter.setBrush(QBrush(QColor(255, 152, 0, 100)))
+            painter.setPen(QPen(QColor("#3B82F6"), 3))
+        else:
+            painter.setPen(self.default_pen)
+            
+        painter.drawPath(self.path())
+        
+        if self.isSelected():
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor("#3B82F6")))
             pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
             for i in range(len(pts) - 1):
                 p1 = pts[i]
                 p2 = pts[i+1]
                 mid_x = (p1.x() + p2.x()) / 2
                 mid_y = (p1.y() + p2.y()) / 2
-                painter.drawEllipse(QPointF(mid_x, mid_y), 6, 6)
+                painter.drawEllipse(QPointF(mid_x, mid_y), 5.0, 5.0)
 
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
@@ -285,6 +379,8 @@ class EdgeItem(QGraphicsPathItem):
                 
                 wp = WaypointItem(snapped_x, snapped_y, self)
                 self.waypoints.insert(self._potential_waypoint_index, wp)
+                
+                self.scene().items_ref.append(wp)
                 self.scene().addItem(wp)
                 self.update_position()
                 
@@ -314,6 +410,8 @@ class EdgeItem(QGraphicsPathItem):
         if wp in self.waypoints:
             self.waypoints.remove(wp)
             self.scene().removeItem(wp)
+            if wp in self.scene().items_ref:
+                self.scene().items_ref.remove(wp)
             self.update_position()
             
     def check_waypoint_straightness(self, wp):
@@ -345,21 +443,22 @@ class FlowchartScene(QGraphicsScene):
         super().__init__(main_window)
         self.main_window = main_window
         self.source_node = None
+        
+        self.items_ref = [] 
 
     def mousePressEvent(self, event):
         tool = self.main_window.current_tool
         
-        # モードに応じたクリック処理（ノード配置）
         if tool in ["process", "decision", "data", "terminal"] and event.button() == Qt.MouseButton.LeftButton:
             pos = event.scenePos()
             snapped_x = round(pos.x() / GRID_SIZE) * GRID_SIZE
             snapped_y = round(pos.y() / GRID_SIZE) * GRID_SIZE
+            
             node = NodeItem(snapped_x, snapped_y, text="Node", node_type=tool)
+            self.items_ref.append(node)
             self.addItem(node)
-            # 連続で配置できるよう、ツール状態はリセットせずイベント消費
             return
 
-        # モードに応じたクリック処理（エッジ接続）
         if tool == "connect" and event.button() == Qt.MouseButton.LeftButton:
             item = self.itemAt(event.scenePos(), QTransform())
             
@@ -375,11 +474,12 @@ class FlowchartScene(QGraphicsScene):
                     edge = EdgeItem(self.source_node, item)
                     self.source_node.add_edge(edge)
                     item.add_edge(edge)
+                    
+                    self.items_ref.append(edge)
                     self.addItem(edge)
                     
                     self.source_node.set_highlight(False)
                     self.source_node = None
-                    # 一回で選択に戻らず、継続してエッジを接続できるようにする
                     self.main_window.statusBar().showMessage("エッジ接続モード: 次のエッジの1つ目のノードをクリックしてください")
                 return
             else:
@@ -389,23 +489,20 @@ class FlowchartScene(QGraphicsScene):
                     self.main_window.statusBar().showMessage("エッジ接続モード: 1つ目のノードをクリックしてください")
                 return
                 
-        # 選択モードの場合は通常のイベント処理（アイテムの選択やドラッグ）
         super().mousePressEvent(event)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Flowchart Editor v1.0.0")
-        self.resize(1100, 700)
-
-        self.current_tool = "select"  # 現在のツール状態の管理
+        self.setWindowTitle("Flowchart Editor v1.0.1")
+        
+        self.current_tool = "select"
 
         self.scene = FlowchartScene(self)
         self.scene.setBackgroundBrush(QBrush(Qt.GlobalColor.white))
         self.scene.setSceneRect(-2000, -2000, 4000, 4000)
 
-        # 通常の QGraphicsView から、ズーム機能を持つカスタムの FlowchartView に変更
         self.view = FlowchartView(self.scene)
         self.view.centerOn(0, 0)
         self.setCentralWidget(self.view)
@@ -435,6 +532,7 @@ class MainWindow(QMainWindow):
             "※ 追加・接続は連続で行えます。終了時は「選択」ボタンを押してください。\n\n"
             "【その他の操作】\n"
             "・テキスト編集: ノードまたは線をダブルクリック\n"
+            "・文字の移動: 線の文字をドラッグして自由に配置可能\n"
             "・ウェイポイント（折り曲げ点）の削除: ダブルクリック\n"
             "・ズーム: Ctrl + マウスホイール\n"
             "・スクロール: マウスホイール"
@@ -444,7 +542,7 @@ class MainWindow(QMainWindow):
     def show_about(self):
         QMessageBox.about(self, "バージョン情報", 
                           "Flowchart Editor\n"
-                          "Version: v1.0.0\n\n"
+                          "Version: v1.0.1\n\n"
                           "Python & PyQt6 製フローチャート作成ツール")
 
     def init_toolbar(self):
@@ -452,16 +550,45 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        # ボタンの排他選択（トグル）のためのグループ
+        toolbar.setStyleSheet("""
+            QToolBar {
+                background: #F8F9FA;
+                spacing: 8px;
+                padding: 6px;
+                border-bottom: 1px solid #DEE2E6;
+            }
+            QToolButton {
+                font-size: 14px;
+                padding: 8px 14px;
+                border-radius: 6px;
+                background: transparent;
+                color: #212529;
+            }
+            QToolButton:hover {
+                background: #E2E6EA;
+            }
+            QToolButton:checked {
+                background: #DBEAFE;
+                color: #1D4ED8;
+                font-weight: bold;
+                border: 1px solid #93C5FD;
+            }
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                color: #495057;
+                padding: 0 4px;
+            }
+        """)
+
         self.action_group = QActionGroup(self)
         self.action_group.setExclusive(True)
 
         def add_spacer():
             spacer = QWidget()
-            spacer.setFixedWidth(10)
+            spacer.setFixedWidth(8)
             toolbar.addWidget(spacer)
 
-        # 👆 選択ボタンの追加
         self.btn_select = toolbar.addAction("👆 選択")
         self.btn_select.setCheckable(True)
         self.btn_select.setChecked(True)
@@ -470,9 +597,7 @@ class MainWindow(QMainWindow):
 
         add_spacer()
 
-        label = QLabel(" ➕ 追加:")
-        label.setStyleSheet("font-weight: bold; color: #333;")
-        toolbar.addWidget(label)
+        toolbar.addWidget(QLabel("➕ 追加:"))
         
         btn_process = toolbar.addAction("⬛ 処理")
         btn_process.setCheckable(True)
@@ -514,7 +639,6 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         add_spacer()
         
-        # ズーム機能のボタン追加
         toolbar.addAction("🔍 拡大", self.zoom_in)
         toolbar.addAction("🔍 縮小", self.zoom_out)
         toolbar.addAction("🔍 100%", self.zoom_reset)
@@ -533,10 +657,8 @@ class MainWindow(QMainWindow):
         toolbar.addAction("📤 エクスポート", self.export_file)
 
     def set_tool(self, tool_name):
-        """ツール状態を切り替えるメソッド"""
         self.current_tool = tool_name
         
-        # モード切替時にエッジ接続の途中状態をリセット
         if self.scene.source_node:
             self.scene.source_node.set_highlight(False)
             self.scene.source_node = None
@@ -585,7 +707,6 @@ class MainWindow(QMainWindow):
         self.view.resetTransform()
 
     def save_json(self):
-        # 先頭のディレクトリ（OSのルートパス等）を初期状態として指定
         initial_dir = os.path.abspath(os.sep)
         path, _ = QFileDialog.getSaveFileName(self, "保存", initial_dir, "JSON Files (*.json)")
         if not path: return
@@ -603,18 +724,22 @@ class MainWindow(QMainWindow):
                     "text_color": item.text_color.name()
                 })
             elif isinstance(item, EdgeItem):
+                offset_data = None
+                if item.text_item.manual_offset is not None:
+                    offset_data = {"x": item.text_item.manual_offset.x(), "y": item.text_item.manual_offset.y()}
+                    
                 data["edges"].append({
                     "source": item.source_node.node_id,
                     "target": item.target_node.node_id,
                     "label": item.raw_text,
-                    "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints]
+                    "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints],
+                    "text_offset": offset_data
                 })
 
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
     def load_json(self):
-        # 先頭のディレクトリ（OSのルートパス等）を初期状態として指定
         initial_dir = os.path.abspath(os.sep)
         path, _ = QFileDialog.getOpenFileName(self, "読込", initial_dir, "JSON Files (*.json)")
         if not path: return
@@ -623,6 +748,7 @@ class MainWindow(QMainWindow):
             data = json.load(f)
 
         self.scene.clear()
+        self.scene.items_ref.clear()
         node_map = {}
 
         for n_data in data.get("nodes", []):
@@ -631,6 +757,7 @@ class MainWindow(QMainWindow):
             text_color = n_data.get("text_color", "#000000")
             
             node = NodeItem(n_data["x"], n_data["y"], n_data["text"], node_type, n_data["id"], bg_color, text_color)
+            self.scene.items_ref.append(node)
             self.scene.addItem(node)
             node_map[node.node_id] = node
 
@@ -643,18 +770,24 @@ class MainWindow(QMainWindow):
             if source and target:
                 edge = EdgeItem(source, target, label)
                 
+                # 保存されたテキストオフセットを復元
+                offset_data = e_data.get("text_offset")
+                if offset_data:
+                    edge.text_item.manual_offset = QPointF(offset_data["x"], offset_data["y"])
+                
                 for wp_d in wps_data:
                     wp = WaypointItem(wp_d["x"], wp_d["y"], edge)
                     edge.waypoints.append(wp)
+                    self.scene.items_ref.append(wp)
                     self.scene.addItem(wp)
                 
                 source.add_edge(edge)
                 target.add_edge(edge)
+                self.scene.items_ref.append(edge)
                 self.scene.addItem(edge)
                 edge.update_position()
 
     def export_file(self):
-        # 先頭のディレクトリ（OSのルートパス等）を初期状態として指定
         initial_dir = os.path.abspath(os.sep)
         path, filt = QFileDialog.getSaveFileName(self, "エクスポート", initial_dir, "PNG Files (*.png);;JPEG Files (*.jpeg *.jpg);;SVG Files (*.svg);;DXF Files (*.dxf)")
         if not path: return
@@ -724,21 +857,17 @@ class MainWindow(QMainWindow):
                 
                 edge_text = item.raw_text
                 if edge_text:
-                    mid_idx = len(pts) // 2
-                    p1 = pts[mid_idx - 1]
-                    p2 = pts[mid_idx]
-                    x1, y1 = p1.x(), -p1.y()
-                    x2, y2 = p2.x(), -p2.y()
-                    
-                    dx = x2 - x1
-                    dy = y2 - y1
-                    length = math.hypot(dx, dy)
-                    if length > 0:
-                        nx = dy / length
-                        ny = -dx / length
-                        offset = 15
-                        mid_x = (x1 + x2) / 2 + nx * offset
-                        mid_y = (y1 + y2) / 2 + ny * offset
+                    base_pos = item.get_auto_text_pos()
+                    if base_pos is not None:
+                        # DXF出力時も手動オフセットを反映させる
+                        if item.text_item.manual_offset is not None:
+                            final_pos = base_pos + item.text_item.manual_offset
+                        else:
+                            final_pos = base_pos
+                            
+                        rect = item.text_item.boundingRect()
+                        mid_x = final_pos.x() + rect.width() / 2
+                        mid_y = -(final_pos.y() + rect.height() / 2)
                         
                         lines = edge_text.split('\n')
                         line_height = 12
@@ -751,5 +880,5 @@ class MainWindow(QMainWindow):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())
