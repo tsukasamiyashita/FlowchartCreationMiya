@@ -1,4 +1,5 @@
 import sys
+import os
 import json
 import uuid
 import math
@@ -7,7 +8,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsScene, QGraphic
                              QToolBar, QFileDialog, QInputDialog, QMessageBox,
                              QGraphicsItem, QGraphicsEllipseItem, QColorDialog, QLabel, QWidget)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF
-from PyQt6.QtGui import QPen, QBrush, QColor, QPainter, QImage, QPainterPath, QTransform, QPainterPathStroker
+from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QPainterPath, 
+                         QTransform, QPainterPathStroker, QAction, QActionGroup)
 from PyQt6.QtSvg import QSvgGenerator
 import ezdxf
 
@@ -71,7 +73,7 @@ class NodeItem(QGraphicsPathItem):
         self.setPos(x, y)
         self.setBrush(QBrush(self.bg_color))
         self.setPen(self.default_pen)
-        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | 
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
                       QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
                       QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         
@@ -87,8 +89,6 @@ class NodeItem(QGraphicsPathItem):
 
     def set_text(self, text):
         escaped_text = text.replace('\n', '<br>')
-        self.text_item.setHtml(f"<div align='center'>{escaped_text}</div>")
-        self.text_item.setPlainText(text) 
         self.text_item.setHtml(f"<div align='center'>{escaped_text}</div>")
         self._update_text_pos()
 
@@ -344,11 +344,23 @@ class FlowchartScene(QGraphicsScene):
     def __init__(self, main_window):
         super().__init__(main_window)
         self.main_window = main_window
-        self.is_connecting = False
         self.source_node = None
 
     def mousePressEvent(self, event):
-        if self.is_connecting and event.button() == Qt.MouseButton.LeftButton:
+        tool = self.main_window.current_tool
+        
+        # モードに応じたクリック処理（ノード配置）
+        if tool in ["process", "decision", "data", "terminal"] and event.button() == Qt.MouseButton.LeftButton:
+            pos = event.scenePos()
+            snapped_x = round(pos.x() / GRID_SIZE) * GRID_SIZE
+            snapped_y = round(pos.y() / GRID_SIZE) * GRID_SIZE
+            node = NodeItem(snapped_x, snapped_y, text="Node", node_type=tool)
+            self.addItem(node)
+            # 連続で配置できるよう、ツール状態はリセットせずイベント消費
+            return
+
+        # モードに応じたクリック処理（エッジ接続）
+        if tool == "connect" and event.button() == Qt.MouseButton.LeftButton:
             item = self.itemAt(event.scenePos(), QTransform())
             
             while item and not isinstance(item, NodeItem):
@@ -367,21 +379,27 @@ class FlowchartScene(QGraphicsScene):
                     
                     self.source_node.set_highlight(False)
                     self.source_node = None
-                    self.main_window.end_connection_mode()
+                    # 一回で選択に戻らず、継続してエッジを接続できるようにする
+                    self.main_window.statusBar().showMessage("エッジ接続モード: 次のエッジの1つ目のノードをクリックしてください")
                 return
             else:
                 if self.source_node:
                     self.source_node.set_highlight(False)
-                self.main_window.end_connection_mode()
+                    self.source_node = None
+                    self.main_window.statusBar().showMessage("エッジ接続モード: 1つ目のノードをクリックしてください")
                 return
+                
+        # 選択モードの場合は通常のイベント処理（アイテムの選択やドラッグ）
         super().mousePressEvent(event)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Flowchart Editor")
+        self.setWindowTitle("Flowchart Editor v1.0.0")
         self.resize(1100, 700)
+
+        self.current_tool = "select"  # 現在のツール状態の管理
 
         self.scene = FlowchartScene(self)
         self.scene.setBackgroundBrush(QBrush(Qt.GlobalColor.white))
@@ -392,36 +410,89 @@ class MainWindow(QMainWindow):
         self.view.centerOn(0, 0)
         self.setCentralWidget(self.view)
 
-        self.node_count = 0
-        self.statusBar().showMessage("準備完了")
-
+        self.init_menu()
         self.init_toolbar()
+        self.statusBar().showMessage("準備完了: アイテムを選択・移動できます")
+
+    def init_menu(self):
+        menubar = self.menuBar()
+        help_menu = menubar.addMenu("ヘルプ(&H)")
+        
+        usage_action = QAction("使い方(&U)", self)
+        usage_action.triggered.connect(self.show_usage)
+        help_menu.addAction(usage_action)
+        
+        about_action = QAction("バージョン情報(&A)", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    def show_usage(self):
+        usage_text = (
+            "【ツールの操作】\n"
+            "・選択モード: アイテムの移動、テキスト編集、線の折り曲げなど\n"
+            "・追加モード: 各図形ボタンを押した後、キャンバス上でクリックして配置\n"
+            "・接続モード: 始点ノード、終点ノードの順にクリックして線を引く\n"
+            "※ 追加・接続は連続で行えます。終了時は「選択」ボタンを押してください。\n\n"
+            "【その他の操作】\n"
+            "・テキスト編集: ノードまたは線をダブルクリック\n"
+            "・ウェイポイント（折り曲げ点）の削除: ダブルクリック\n"
+            "・ズーム: Ctrl + マウスホイール\n"
+            "・スクロール: マウスホイール"
+        )
+        QMessageBox.information(self, "使い方", usage_text)
+
+    def show_about(self):
+        QMessageBox.about(self, "バージョン情報", 
+                          "Flowchart Editor\n"
+                          "Version: v1.0.0\n\n"
+                          "Python & PyQt6 製フローチャート作成ツール")
 
     def init_toolbar(self):
         toolbar = QToolBar("Main Toolbar")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
+        # ボタンの排他選択（トグル）のためのグループ
+        self.action_group = QActionGroup(self)
+        self.action_group.setExclusive(True)
+
         def add_spacer():
             spacer = QWidget()
             spacer.setFixedWidth(10)
             toolbar.addWidget(spacer)
+
+        # 👆 選択ボタンの追加
+        self.btn_select = toolbar.addAction("👆 選択")
+        self.btn_select.setCheckable(True)
+        self.btn_select.setChecked(True)
+        self.btn_select.triggered.connect(lambda: self.set_tool("select"))
+        self.action_group.addAction(self.btn_select)
+
+        add_spacer()
 
         label = QLabel(" ➕ 追加:")
         label.setStyleSheet("font-weight: bold; color: #333;")
         toolbar.addWidget(label)
         
         btn_process = toolbar.addAction("⬛ 処理")
-        btn_process.triggered.connect(lambda checked=False: self.add_node("process"))
+        btn_process.setCheckable(True)
+        btn_process.triggered.connect(lambda: self.set_tool("process"))
+        self.action_group.addAction(btn_process)
         
         btn_decision = toolbar.addAction("◆ 分岐")
-        btn_decision.triggered.connect(lambda checked=False: self.add_node("decision"))
+        btn_decision.setCheckable(True)
+        btn_decision.triggered.connect(lambda: self.set_tool("decision"))
+        self.action_group.addAction(btn_decision)
         
         btn_data = toolbar.addAction("▱ データ")
-        btn_data.triggered.connect(lambda checked=False: self.add_node("data"))
+        btn_data.setCheckable(True)
+        btn_data.triggered.connect(lambda: self.set_tool("data"))
+        self.action_group.addAction(btn_data)
         
         btn_terminal = toolbar.addAction("⬭ 端子")
-        btn_terminal.triggered.connect(lambda checked=False: self.add_node("terminal"))
+        btn_terminal.setCheckable(True)
+        btn_terminal.triggered.connect(lambda: self.set_tool("terminal"))
+        self.action_group.addAction(btn_terminal)
         
         add_spacer()
         toolbar.addSeparator()
@@ -429,7 +500,8 @@ class MainWindow(QMainWindow):
         
         self.connect_action = toolbar.addAction("🔗 エッジ接続")
         self.connect_action.setCheckable(True)
-        self.connect_action.triggered.connect(self.toggle_connection_mode)
+        self.connect_action.triggered.connect(lambda: self.set_tool("connect"))
+        self.action_group.addAction(self.connect_action)
         
         add_spacer()
         toolbar.addSeparator()
@@ -460,35 +532,24 @@ class MainWindow(QMainWindow):
         
         toolbar.addAction("📤 エクスポート", self.export_file)
 
-    def add_node(self, node_type):
-        center = self.view.mapToScene(self.view.viewport().rect().center())
-        offset = (self.node_count % 10) * 20
-        x = center.x() + offset - 50
-        y = center.y() + offset - 25
+    def set_tool(self, tool_name):
+        """ツール状態を切り替えるメソッド"""
+        self.current_tool = tool_name
         
-        snapped_x = round(x / GRID_SIZE) * GRID_SIZE
-        snapped_y = round(y / GRID_SIZE) * GRID_SIZE
-        
-        node = NodeItem(snapped_x, snapped_y, text="Node", node_type=node_type)
-        self.scene.addItem(node)
-        self.node_count += 1
-
-    def toggle_connection_mode(self, checked):
-        self.scene.is_connecting = checked
-        if checked:
-            self.view.setCursor(Qt.CursorShape.CrossCursor)
+        # モード切替時にエッジ接続の途中状態をリセット
+        if self.scene.source_node:
+            self.scene.source_node.set_highlight(False)
             self.scene.source_node = None
+            
+        if tool_name == "select":
+            self.view.setCursor(Qt.CursorShape.ArrowCursor)
+            self.statusBar().showMessage("準備完了: アイテムを選択・移動できます")
+        elif tool_name == "connect":
+            self.view.setCursor(Qt.CursorShape.CrossCursor)
             self.statusBar().showMessage("エッジ接続モード: 1つ目のノードをクリックしてください")
         else:
-            self.view.setCursor(Qt.CursorShape.ArrowCursor)
-            if self.scene.source_node:
-                self.scene.source_node.set_highlight(False)
-            self.scene.source_node = None
-            self.statusBar().showMessage("準備完了")
-
-    def end_connection_mode(self):
-        self.connect_action.setChecked(False)
-        self.toggle_connection_mode(False)
+            self.view.setCursor(Qt.CursorShape.CrossCursor)
+            self.statusBar().showMessage("ノード配置モード: キャンバスをクリックして配置します")
 
     def change_bg_color(self):
         selected_nodes = [item for item in self.scene.selectedItems() if isinstance(item, NodeItem)]
@@ -514,7 +575,6 @@ class MainWindow(QMainWindow):
             for node in selected_nodes:
                 node.set_text_color(color)
 
-    # ズーム機能のメソッド
     def zoom_in(self):
         self.view.scale(1.15, 1.15)
 
@@ -525,7 +585,9 @@ class MainWindow(QMainWindow):
         self.view.resetTransform()
 
     def save_json(self):
-        path, _ = QFileDialog.getSaveFileName(self, "保存", "", "JSON Files (*.json)")
+        # 先頭のディレクトリ（OSのルートパス等）を初期状態として指定
+        initial_dir = os.path.abspath(os.sep)
+        path, _ = QFileDialog.getSaveFileName(self, "保存", initial_dir, "JSON Files (*.json)")
         if not path: return
 
         data = {"nodes": [], "edges": []}
@@ -552,7 +614,9 @@ class MainWindow(QMainWindow):
             json.dump(data, f, indent=4, ensure_ascii=False)
 
     def load_json(self):
-        path, _ = QFileDialog.getOpenFileName(self, "読込", "", "JSON Files (*.json)")
+        # 先頭のディレクトリ（OSのルートパス等）を初期状態として指定
+        initial_dir = os.path.abspath(os.sep)
+        path, _ = QFileDialog.getOpenFileName(self, "読込", initial_dir, "JSON Files (*.json)")
         if not path: return
 
         with open(path, 'r', encoding='utf-8') as f:
@@ -590,7 +654,9 @@ class MainWindow(QMainWindow):
                 edge.update_position()
 
     def export_file(self):
-        path, filt = QFileDialog.getSaveFileName(self, "エクスポート", "", "PNG Files (*.png);;JPEG Files (*.jpeg *.jpg);;SVG Files (*.svg);;DXF Files (*.dxf)")
+        # 先頭のディレクトリ（OSのルートパス等）を初期状態として指定
+        initial_dir = os.path.abspath(os.sep)
+        path, filt = QFileDialog.getSaveFileName(self, "エクスポート", initial_dir, "PNG Files (*.png);;JPEG Files (*.jpeg *.jpg);;SVG Files (*.svg);;DXF Files (*.dxf)")
         if not path: return
 
         self.scene.clearSelection()
