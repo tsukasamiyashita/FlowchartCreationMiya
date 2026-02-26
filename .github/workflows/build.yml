@@ -34,7 +34,7 @@ jobs:
         --onefile 
         --noconsole 
         --clean 
-        --name "FlowchartCreationMiya-v1.0.1" 
+        --name "FlowchartCreationMiya-v1.1.0" 
         --add-data "README.md;."
         --collect-all PyQt6
         app.pyw
@@ -43,5 +43,5 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: FlowchartCreationMiya-v1.0.1
-        path: dist/FlowchartCreationMiya-v1.0.1.exe
+        name: FlowchartCreationMiya-v1.1.0
+        path: dist/FlowchartCreationMiya-v1.1.0.exe
