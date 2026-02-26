@@ -3,6 +3,7 @@ import os
 import json
 import uuid
 import math
+import unicodedata
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsScene, QGraphicsView, 
                              QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, 
                              QToolBar, QFileDialog, QInputDialog, QMessageBox,
@@ -10,6 +11,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsScene, QGraphic
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QPainterPath, 
                          QTransform, QPainterPathStroker, QAction, QActionGroup)
+from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PyQt6.QtSvg import QSvgGenerator
 import ezdxf
 
@@ -189,14 +191,12 @@ class EdgeTextItem(QGraphicsTextItem):
     def __init__(self, text, edge):
         super().__init__(text)
         self.edge = edge
-        # 移動、選択を許可する
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | 
                       QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | 
                       QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.setParentItem(edge)
         self.setDefaultTextColor(QColor("#333333"))
         
-        # ユーザーがドラッグして設定したオフセット (Noneの場合は自動配置)
         self.manual_offset = None
         self._is_dragging = False
 
@@ -209,7 +209,6 @@ class EdgeTextItem(QGraphicsTextItem):
         super().mouseReleaseEvent(event)
 
     def itemChange(self, change, value):
-        # ユーザーがドラッグして位置を動かした場合、基準位置からのオフセットを記録する
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self._is_dragging:
             base_pos = self.edge.get_auto_text_pos()
             if base_pos is not None:
@@ -217,7 +216,6 @@ class EdgeTextItem(QGraphicsTextItem):
         return super().itemChange(change, value)
 
     def mouseDoubleClickEvent(self, event):
-        # テキストアイテムのダブルクリックで編集
         new_text, ok = QInputDialog.getMultiLineText(
             None, "エッジのテキスト編集", "線上のテキスト (複数行入力可):", self.edge.raw_text
         )
@@ -225,11 +223,9 @@ class EdgeTextItem(QGraphicsTextItem):
             self.edge.set_text(new_text)
 
     def paint(self, painter, option, widget=None):
-        # デフォルトのダサい点線枠を消す
         option.state &= ~QStyle.StateFlag.State_Selected
         super().paint(painter, option, widget)
         
-        # 選択時には移動可能であることを分かりやすくするため、薄い青枠を表示
         if self.isSelected():
             painter.setPen(QPen(QColor("#3B82F6"), 1, Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -253,7 +249,6 @@ class EdgeItem(QGraphicsPathItem):
         self.setZValue(-1)
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         
-        # カスタムテキストアイテムを作成
         self.text_item = EdgeTextItem("", self)
         
         self._set_label_html(label)
@@ -282,7 +277,6 @@ class EdgeItem(QGraphicsPathItem):
         self.update_position()
 
     def get_auto_text_pos(self):
-        """テキストのデフォルト（自動）配置位置を計算して返す"""
         if not self.source_node or not self.target_node:
             return None
         pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
@@ -326,7 +320,6 @@ class EdgeItem(QGraphicsPathItem):
         if self.raw_text:
             base_pos = self.get_auto_text_pos()
             if base_pos is not None:
-                # 手動で移動されたオフセットがある場合はそれを足す
                 if self.text_item.manual_offset is not None:
                     self.text_item.setPos(base_pos + self.text_item.manual_offset)
                 else:
@@ -495,9 +488,11 @@ class FlowchartScene(QGraphicsScene):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Flowchart Editor v1.0.1")
+        self.setWindowTitle("Flowchart Editor v1.0.4")
         
         self.current_tool = "select"
+        self._print_rect = QRectF()
+        self._print_selection_only = False
 
         self.scene = FlowchartScene(self)
         self.scene.setBackgroundBrush(QBrush(Qt.GlobalColor.white))
@@ -513,6 +508,33 @@ class MainWindow(QMainWindow):
 
     def init_menu(self):
         menubar = self.menuBar()
+        
+        file_menu = menubar.addMenu("ファイル(&F)")
+        
+        save_action = QAction("保存(&S)", self)
+        save_action.triggered.connect(self.save_json)
+        file_menu.addAction(save_action)
+        
+        load_action = QAction("読込(&O)", self)
+        load_action.triggered.connect(self.load_json)
+        file_menu.addAction(load_action)
+        
+        file_menu.addSeparator()
+        
+        export_action = QAction("エクスポート(&E)...", self)
+        export_action.triggered.connect(self.export_file)
+        file_menu.addAction(export_action)
+        
+        print_action = QAction("印刷プレビュー(&P)...", self)
+        print_action.triggered.connect(self.show_print_preview)
+        file_menu.addAction(print_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction("終了(&X)", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
         help_menu = menubar.addMenu("ヘルプ(&H)")
         
         usage_action = QAction("使い方(&U)", self)
@@ -535,14 +557,15 @@ class MainWindow(QMainWindow):
             "・文字の移動: 線の文字をドラッグして自由に配置可能\n"
             "・ウェイポイント（折り曲げ点）の削除: ダブルクリック\n"
             "・ズーム: Ctrl + マウスホイール\n"
-            "・スクロール: マウスホイール"
+            "・スクロール: マウスホイール\n"
+            "・印刷: ツールバーまたはファイルメニューから。印刷時に印刷範囲を選択可能です。"
         )
         QMessageBox.information(self, "使い方", usage_text)
 
     def show_about(self):
         QMessageBox.about(self, "バージョン情報", 
                           "Flowchart Editor\n"
-                          "Version: v1.0.1\n\n"
+                          "Version: v1.0.4\n\n"
                           "Python & PyQt6 製フローチャート作成ツール")
 
     def init_toolbar(self):
@@ -655,6 +678,12 @@ class MainWindow(QMainWindow):
         add_spacer()
         
         toolbar.addAction("📤 エクスポート", self.export_file)
+
+        add_spacer()
+        toolbar.addSeparator()
+        add_spacer()
+        
+        toolbar.addAction("🖨️ 印刷", self.show_print_preview)
 
     def set_tool(self, tool_name):
         self.current_tool = tool_name
@@ -770,7 +799,6 @@ class MainWindow(QMainWindow):
             if source and target:
                 edge = EdgeItem(source, target, label)
                 
-                # 保存されたテキストオフセットを復元
                 offset_data = e_data.get("text_offset")
                 if offset_data:
                     edge.text_item.manual_offset = QPointF(offset_data["x"], offset_data["y"])
@@ -859,7 +887,6 @@ class MainWindow(QMainWindow):
                 if edge_text:
                     base_pos = item.get_auto_text_pos()
                     if base_pos is not None:
-                        # DXF出力時も手動オフセットを反映させる
                         if item.text_item.manual_offset is not None:
                             final_pos = base_pos + item.text_item.manual_offset
                         else:
@@ -876,6 +903,95 @@ class MainWindow(QMainWindow):
                             msp.add_text(line, dxfattribs={'height': 10}).set_placement((mid_x, start_y - i * line_height), align=ezdxf.enums.TextEntityAlignment.MIDDLE_CENTER)
         
         doc.saveas(path)
+
+    def show_print_preview(self):
+        items = ["図面全体", "現在の表示範囲"]
+        has_selection = len(self.scene.selectedItems()) > 0
+        if has_selection:
+            items.append("選択したアイテム")
+
+        item, ok = QInputDialog.getItem(self, "印刷範囲の選択", "印刷したい範囲を選択してください:", items, 0, False)
+        if not ok:
+            return
+
+        if item == "図面全体":
+            self._print_rect = self.scene.itemsBoundingRect()
+            self._print_selection_only = False
+        elif item == "現在の表示範囲":
+            self._print_rect = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
+            self._print_selection_only = False
+        elif item == "選択したアイテム":
+            rect = QRectF()
+            for si in self.scene.selectedItems():
+                rect = rect.united(si.sceneBoundingRect())
+            self._print_rect = rect
+            self._print_selection_only = True
+
+        if self._print_rect.isEmpty() or self._print_rect.width() == 0 or self._print_rect.height() == 0:
+            QMessageBox.information(self, "情報", "印刷するアイテムが指定範囲にありません。")
+            return
+            
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        preview_dialog = QPrintPreviewDialog(printer, self)
+        preview_dialog.setWindowTitle("印刷プレビュー")
+        preview_dialog.paintRequested.connect(self.handle_print)
+        preview_dialog.exec()
+
+    def handle_print(self, printer):
+        selected_items = self.scene.selectedItems()
+        self.scene.clearSelection()
+        
+        rect = QRectF(self._print_rect)
+        margin = 20
+        rect.adjust(-margin, -margin, margin, margin)
+        
+        painter = QPainter(printer)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        page_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+        
+        x_scale = page_rect.width() / rect.width()
+        y_scale = page_rect.height() / rect.height()
+        scale = min(x_scale, y_scale)
+        
+        x_offset = (page_rect.width() - rect.width() * scale) / 2.0
+        y_offset = (page_rect.height() - rect.height() * scale) / 2.0
+        
+        painter.translate(x_offset, y_offset)
+        painter.scale(scale, scale)
+        painter.translate(-rect.left(), -rect.top())
+        
+        hidden_items = []
+        if getattr(self, '_print_selection_only', False):
+            # 選択されたアイテムのみを描画するため、関連しないものを一時的に隠す
+            def should_keep_visible(it):
+                if it in selected_items:
+                    return True
+                if isinstance(it, WaypointItem) and getattr(it, 'edge', None) in selected_items:
+                    return True
+                for child in it.childItems():
+                    if should_keep_visible(child):
+                        return True
+                return False
+
+            for item in self.scene.items():
+                if item.parentItem() is None:
+                    if not should_keep_visible(item) and item.isVisible():
+                        item.hide()
+                        hidden_items.append(item)
+
+        self.scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
+        
+        if getattr(self, '_print_selection_only', False):
+            for item in hidden_items:
+                item.show()
+
+        painter.end()
+        
+        # 印刷後、元の選択状態を復元
+        for item in selected_items:
+            item.setSelected(True)
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
