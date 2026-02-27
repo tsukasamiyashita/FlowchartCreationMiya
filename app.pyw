@@ -20,13 +20,17 @@ import ezdxf
 GRID_SIZE = 20  # グリッドのサイズ（スナップ間隔）
 
 class FlowchartView(QGraphicsView):
-    """ズーム機能（Ctrl+ホイール）をサポートするカスタムビュー"""
+    """ズーム機能と範囲選択（ラバーバンド）をサポートするカスタムビュー"""
     def __init__(self, scene):
         super().__init__(scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.zoom_factor = 1.15
+        
+        # 範囲選択（ラバーバンド）の有効化
+        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setRubberBandSelectionMode(Qt.ItemSelectionMode.IntersectsItemShape)
 
     def wheelEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
@@ -153,7 +157,7 @@ class WaypointItem(QGraphicsEllipseItem):
         self.setPos(x, y)
         self.setBrush(QBrush(QColor("#FF9800")))
         self.setPen(QPen(Qt.GlobalColor.white, 2))
-        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | 
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
                       QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges |
                       QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setZValue(1)
@@ -194,7 +198,7 @@ class EdgeTextItem(QGraphicsTextItem):
         super().__init__(text)
         self.edge = edge
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | 
-                      QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | 
+                      QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
                       QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.setParentItem(edge)
         self.setDefaultTextColor(QColor("#333333"))
@@ -282,6 +286,7 @@ class EdgeItem(QGraphicsPathItem):
         if not self.source_node or not self.target_node:
             return None
         pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
+        
         if len(pts) < 2: return None
         
         mid_idx = len(pts) // 2
@@ -348,6 +353,11 @@ class EdgeItem(QGraphicsPathItem):
 
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
+        
+        # Ctrlキー押下時は標準の複数選択挙動を優先し、ウェイポイント生成をスキップ
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.scenePos()
             pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
@@ -485,8 +495,13 @@ class FlowchartScene(QGraphicsScene):
                 
         super().mousePressEvent(event)
 
+    def keyPressEvent(self, event):
+        # DeleteキーまたはBackspaceキーで選択アイテムを削除する
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.main_window.delete_selected_items()
+        super().keyPressEvent(event)
 
-# DXFやJw_cadエクスポート時に、線がノードの中に入り込まないようクリッピング（切り取り）するための補助関数
+
 def clip_line_to_node(p_start: QPointF, p_end: QPointF, node: NodeItem) -> QPointF:
     """ノードの中心から次の点へ向かう線分を、ノードの境界輪郭線でクリップし、その交点を返す"""
     line = QLineF(p_start, p_end)
@@ -593,6 +608,7 @@ class CustomPrintPreviewDialog(QDialog):
         
         scale_group = QGroupBox("スケール設定")
         sc_layout = QVBoxLayout()
+        
         self.radio_auto = QRadioButton("自動調整（ページに合わせる）")
         self.radio_custom = QRadioButton("倍率指定 (%)")
         self.radio_auto.setChecked(True)
@@ -770,11 +786,11 @@ class MainWindow(QMainWindow):
 
         self.init_menu()
         self.init_toolbar()
-        self.statusBar().showMessage("準備完了: アイテムを選択・移動できます")
+        self.statusBar().showMessage("準備完了: 範囲選択や複数選択（Ctrlキー+クリック）が可能です")
 
     def update_window_title(self):
         """現在のファイル名に応じてウィンドウのタイトルを更新する"""
-        base_title = "FlowchartCreationMiya v1.1.0"
+        base_title = "FlowchartCreationMiya v1.2.0"
         if self.current_filepath:
             filename = os.path.basename(self.current_filepath)
             self.setWindowTitle(f"{filename} - {base_title}")
@@ -821,6 +837,17 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        # 追加機能: 配置（複数選択時の整列など）
+        arrange_menu = menubar.addMenu("配置(&A)")
+        
+        align_left_action = QAction("左に揃える", self)
+        align_left_action.triggered.connect(self.align_items_left)
+        arrange_menu.addAction(align_left_action)
+        
+        align_top_action = QAction("上に揃える", self)
+        align_top_action.triggered.connect(self.align_items_top)
+        arrange_menu.addAction(align_top_action)
+
         help_menu = menubar.addMenu("ヘルプ(&H)")
         
         usage_action = QAction("使い方(&U)", self)
@@ -834,14 +861,15 @@ class MainWindow(QMainWindow):
     def show_usage(self):
         usage_text = (
             "【ツールの操作】\n"
-            "・選択モード: アイテムの移動、テキスト編集、線の折り曲げなど\n"
+            "・選択モード: アイテムの移動や複数選択（ドラッグで範囲指定、Ctrl+クリックで個別選択）ができます\n"
             "・追加モード: 各図形ボタンを押した後、キャンバス上でクリックして配置\n"
             "・接続モード: 始点ノード、終点ノードの順にクリックして線を引く\n"
             "※ 追加・接続は連続で行えます。終了時は「選択」ボタンを押してください。\n\n"
             "【その他の操作】\n"
+            "・一括編集: 複数選択してから「背景色」「文字色」「削除」等を実行すると一括で反映されます\n"
+            "・削除: アイテムを選択してツールバーの「削除」ボタン、または Delete / Backspace キー\n"
             "・テキスト編集: ノードまたは線をダブルクリック\n"
             "・文字の移動: 線の文字をドラッグして自由に配置可能\n"
-            "・ウェイポイント（折り曲げ点）の削除: ダブルクリック\n"
             "・ズーム: Ctrl + マウスホイール\n"
             "・スクロール: マウスホイール\n\n"
             "【ファイル操作・印刷・Jw_cad連携】\n"
@@ -853,7 +881,7 @@ class MainWindow(QMainWindow):
     def show_about(self):
         QMessageBox.about(self, "バージョン情報", 
                           "FlowchartCreationMiya\n"
-                          "Version: v1.1.0\n\n"
+                          "Version: v1.2.0\n\n"
                           "Python & PyQt6 製フローチャート作成ツール")
 
     def init_toolbar(self):
@@ -948,6 +976,9 @@ class MainWindow(QMainWindow):
         toolbar.addAction("🎨 背景色", self.change_bg_color)
         toolbar.addAction("🔠 文字色", self.change_text_color)
         
+        # 削除ボタンを追加
+        toolbar.addAction("🗑️ 削除", self.delete_selected_items)
+        
         add_spacer()
         toolbar.addSeparator()
         add_spacer()
@@ -964,12 +995,15 @@ class MainWindow(QMainWindow):
             self.scene.source_node = None
             
         if tool_name == "select":
+            self.view.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
             self.view.setCursor(Qt.CursorShape.ArrowCursor)
-            self.statusBar().showMessage("準備完了: アイテムを選択・移動できます")
+            self.statusBar().showMessage("準備完了: 範囲選択や複数選択（Ctrlキー+クリック）が可能です")
         elif tool_name == "connect":
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.view.setCursor(Qt.CursorShape.CrossCursor)
             self.statusBar().showMessage("エッジ接続モード: 1つ目のノードをクリックしてください")
         else:
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.view.setCursor(Qt.CursorShape.CrossCursor)
             self.statusBar().showMessage("ノード配置モード: キャンバスをクリックして配置します")
 
@@ -996,6 +1030,80 @@ class MainWindow(QMainWindow):
         if color.isValid():
             for node in selected_nodes:
                 node.set_text_color(color)
+                
+    def align_items_left(self):
+        """複数選択されたノードを一番左のノードに合わせて整列する"""
+        nodes = [item for item in self.scene.selectedItems() if isinstance(item, NodeItem)]
+        if len(nodes) < 2:
+            return
+            
+        min_x = min(node.scenePos().x() for node in nodes)
+        for node in nodes:
+            node.setPos(min_x, node.scenePos().y())
+
+    def align_items_top(self):
+        """複数選択されたノードを一番上のノードに合わせて整列する"""
+        nodes = [item for item in self.scene.selectedItems() if isinstance(item, NodeItem)]
+        if len(nodes) < 2:
+            return
+            
+        min_y = min(node.scenePos().y() for node in nodes)
+        for node in nodes:
+            node.setPos(node.scenePos().x(), min_y)
+
+    def delete_selected_items(self):
+        """選択されている複数のアイテム（ノード、エッジ、ウェイポイント）を安全に一括削除する"""
+        selected_items = self.scene.selectedItems()
+        if not selected_items:
+            return
+
+        edges_to_delete = set()
+        nodes_to_delete = set()
+        waypoints_to_delete = set()
+        
+        for item in selected_items:
+            if isinstance(item, NodeItem):
+                nodes_to_delete.add(item)
+                # ノードが削除されるなら、接続されているエッジもすべて削除する
+                for edge in item.edges:
+                    edges_to_delete.add(edge)
+            elif isinstance(item, EdgeItem):
+                edges_to_delete.add(item)
+            elif isinstance(item, WaypointItem):
+                waypoints_to_delete.add(item)
+
+        # ウェイポイント単独の削除（エッジ全体が消える場合は不要）
+        for wp in waypoints_to_delete:
+            if wp.edge not in edges_to_delete:
+                wp.edge.remove_waypoint(wp)
+                
+        # エッジの完全削除（関連するウェイポイントや接続ノードからの参照も解除）
+        for edge in edges_to_delete:
+            for wp in edge.waypoints:
+                if wp.scene():
+                    self.scene.removeItem(wp)
+                if wp in self.scene.items_ref:
+                    self.scene.items_ref.remove(wp)
+            edge.waypoints.clear()
+            
+            if edge in edge.source_node.edges:
+                edge.source_node.edges.remove(edge)
+            if edge in edge.target_node.edges:
+                edge.target_node.edges.remove(edge)
+                
+            if edge.scene():
+                self.scene.removeItem(edge)
+            if edge in self.scene.items_ref:
+                self.scene.items_ref.remove(edge)
+
+        # ノードの削除
+        for node in nodes_to_delete:
+            if node.scene():
+                self.scene.removeItem(node)
+            if node in self.scene.items_ref:
+                self.scene.items_ref.remove(node)
+                
+        self.statusBar().showMessage("選択したアイテムを削除しました", 3000)
 
     def zoom_in(self):
         self.view.scale(1.15, 1.15)
