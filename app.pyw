@@ -185,7 +185,10 @@ class EdgeTextItem(QGraphicsTextItem):
 
     def mouseDoubleClickEvent(self, event):
         new_text, ok = QInputDialog.getMultiLineText(None, "エッジのテキスト編集", "線上のテキスト:", self.edge.raw_text)
-        if ok: self.edge.set_text(new_text); self.scene().main_window.push_undo_state("エッジテキスト変更")
+        if ok: 
+            self.edge.set_text(new_text)
+            if self.scene() and hasattr(self.scene(), 'main_window'):
+                self.scene().main_window.push_undo_state("エッジテキスト変更")
 
     def paint(self, painter, option, widget=None):
         option.state &= ~QStyle.StateFlag.State_Selected
@@ -224,17 +227,24 @@ class EdgeItem(QGraphicsPathItem):
 
     def _set_label_html(self, text):
         self.raw_text = text
-        if text: self.text_item.setHtml(f"<div style='font-weight: bold; font-family: sans-serif; text-align: center;'>{text.replace(chr(10), '<br>')}</div>")
-        else: self.text_item.setHtml("")
+        if text: 
+            self.text_item.setHtml(f"<div style='font-weight: bold; font-family: sans-serif; text-align: center;'>{text.replace(chr(10), '<br>')}</div>")
+            self.text_item.show()
+        else: 
+            self.text_item.setHtml("")
+            self.text_item.hide()
 
-    def set_text(self, text): self._set_label_html(text); self.update_position()
+    def set_text(self, text): 
+        self._set_label_html(text)
+        self.update_position()
 
     def get_auto_text_pos(self):
         if not self.source_node or not self.target_node: return None
         path = self.path()
-        if path.elementCount() < 2: return QPointF(0,0)
-        mid_element = path.elementAt(path.elementCount() // 2)
-        c = QPointF(mid_element.x, mid_element.y)
+        if path.isEmpty(): return QPointF(0, 0)
+        
+        # どのような線（直線・直角）でも、パスの長さのちょうど半分の位置にテキストを配置
+        c = path.pointAtPercent(0.5)
         r = self.text_item.boundingRect()
         return QPointF(c.x() - r.width()/2, c.y() - r.height()/2 - 15)
 
@@ -299,7 +309,14 @@ class EdgeItem(QGraphicsPathItem):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event): self._drag_start_pos = None; self._potential_waypoint_index = -1; super().mouseReleaseEvent(event)
-    def mouseDoubleClickEvent(self, event): super().mouseDoubleClickEvent(event)
+    
+    def mouseDoubleClickEvent(self, event):
+        new_text, ok = QInputDialog.getMultiLineText(None, "エッジのテキスト編集", "線上のテキスト:", self.raw_text)
+        if ok:
+            self.set_text(new_text)
+            if self.scene() and hasattr(self.scene(), 'main_window'):
+                self.scene().main_window.push_undo_state("エッジテキスト変更")
+        super().mouseDoubleClickEvent(event)
 
     def remove_waypoint(self, wp):
         if wp in self.waypoints:
@@ -629,16 +646,15 @@ class MainWindow(QMainWindow):
         self.view.centerOn(0, 0)
         self.setCentralWidget(self.view)
 
-        self.icon_actions = []  # テーマ切り替え時のアイコン更新用リスト
+        self.icon_actions = [] 
         self.init_menu()
         self.init_toolbars()
-        self.apply_theme()  # 起動時に一括でテーマとアイコン色を適用
+        self.apply_theme() 
         
         self.update_window_title()
         self.statusBar().showMessage("準備完了: 範囲選択や複数選択（Ctrlキー+クリック）が可能です")
 
     def create_icon_action(self, icon_name, text, slot=None, shortcut=None, checkable=False):
-        """アイコン付きのアクションを生成し、リストに登録しておくヘルパーメソッド"""
         act = QAction(text, self)
         if shortcut: act.setShortcut(shortcut)
         if checkable: act.setCheckable(True)
@@ -658,7 +674,6 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"Theme setup failed: {e}")
         
-        # テーマに応じて文字色とホバー色を切り替える
         text_color = "#212529" if self.is_light_theme else "#F8F9FA"
         bg_hover = "#E2E6EA" if self.is_light_theme else "#495057"
         
@@ -669,7 +684,6 @@ class MainWindow(QMainWindow):
             QToolButton:checked {{ background: #3B82F6; color: white; font-weight: bold; }} 
         """)
 
-        # アイコンの色をテーマに合わせて更新
         icon_color = '#212529' if self.is_light_theme else '#F8F9FA'
         for act, icon_name in self.icon_actions:
             if icon_name:
@@ -689,7 +703,6 @@ class MainWindow(QMainWindow):
         data = {"nodes": [], "edges": [], "groups": []}
         items_raw = self.scene.selectedItems() if selected_only else self.scene.items()
         
-        # グループが選択されている場合、その子アイテムも確実に取得対象に含める
         items = set()
         for it in items_raw:
             items.add(it)
@@ -755,7 +768,7 @@ class MainWindow(QMainWindow):
             self.last_state = new_state
 
     def update_window_title(self):
-        base = "FlowchartCreationMiya Pro"
+        base = "FlowchartCreationMiya v1.2.0"
         self.setWindowTitle(f"{os.path.basename(self.current_filepath)} - {base}" if self.current_filepath else base)
 
     def init_menu(self):
@@ -804,6 +817,23 @@ class MainWindow(QMainWindow):
         view_menu = menubar.addMenu("表示(&V)")
         act_theme = self.create_icon_action('fa5s.adjust', "テーマ切り替え (Light/Dark)", self.toggle_theme)
         view_menu.addAction(act_theme)
+        
+        help_menu = menubar.addMenu("ヘルプ(&H)")
+        help_menu.addAction("使い方(&U)", self.show_usage); help_menu.addAction("バージョン情報(&A)", self.show_about)
+
+    def show_usage(self):
+        msg = ("【操作説明】\n"
+               "・図形の追従プレビュー: 追加モード時やコピペ時、カーソルにゴーストが追従します。\n"
+               "・Undo/Redo: Ctrl+Z / Ctrl+Y\n"
+               "・コピー＆ペースト: Ctrl+Cでコピーし、キャンバスをクリックして配置\n"
+               "・グループ化: Ctrl+G / 解除: Ctrl+Shift+G\n"
+               "・整列 / 自動レイアウト: 複数選択して上部メニューの「配置」から実行\n"
+               "・線のスタイル: エッジを選択して「書式ツールバー」で太さや直角配線を変更\n\n"
+               "・Jw_cad連携 / 仕様書生成 / Draw.io互換 は「ファイル」メニューから実行可能です。")
+        QMessageBox.information(self, "使い方", msg)
+
+    def show_about(self): 
+        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.2.0\nPython & PyQt6 製フローチャート作成ツール")
 
     def init_toolbars(self):
         tb_main = QToolBar("メインツール"); self.addToolBar(tb_main)
@@ -826,7 +856,6 @@ class MainWindow(QMainWindow):
         tb_edit.addAction(self.act_undo)
         tb_edit.addAction(self.act_redo)
         tb_edit.addSeparator()
-        # メニューで作ったアクションをツールバーにも流用
         for act, _ in self.icon_actions:
             if act.text() in ["コピー(&C)", "貼り付け(&V)", "削除(&D)"]:
                 tb_edit.addAction(act)
@@ -855,7 +884,6 @@ class MainWindow(QMainWindow):
             self.scene.update_preview_node(None, tool_name)
         elif tool_name == "paste":
             self.view.setDragMode(QGraphicsView.DragMode.NoDrag); self.view.setCursor(Qt.CursorShape.CrossCursor); self.statusBar().showMessage("ペーストモード")
-            # ペースト中は直感的にプレビューを即座に表示
             g_pos = QCursor.pos(); v_pos = self.view.mapFromGlobal(g_pos)
             if self.view.rect().contains(v_pos): self.scene.update_preview_node(self.view.mapToScene(v_pos), tool_name)
         else: 
@@ -1001,12 +1029,11 @@ class MainWindow(QMainWindow):
             self.clipboard_base_pos = QPointF(min(n["x"] for n in nodes_data), min(n["y"] for n in nodes_data))
             self.statusBar().showMessage("コピーしました（クリックで配置）", 3000)
             
-            # コピー元のアイテムを引きずらないように選択を解除する
             self.scene.clearSelection()
             self.set_tool("paste")
         else:
             self.clipboard_base_pos = QPointF(0, 0)
-            self.statusBar().showMessage("コピーに失敗しました（ノードが含まれていません）", 3000)
+            self.statusBar().showMessage("コピーに失敗しました", 3000)
 
     def paste_items(self):
         if self.clipboard_data and self.clipboard_data.get("nodes"): 
