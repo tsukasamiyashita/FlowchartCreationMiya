@@ -1,2 +1,6 @@
 PyQt6
 ezdxf
+qtawesome
+pyqtdarktheme
+networkx
+openpyxl

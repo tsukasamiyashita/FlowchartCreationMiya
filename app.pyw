@@ -4,6 +4,7 @@ import json
 import uuid
 import math
 import unicodedata
+import xml.etree.ElementTree as ET
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsScene, QGraphicsView, 
                              QGraphicsPathItem, QGraphicsLineItem, QGraphicsTextItem, 
                              QToolBar, QFileDialog, QInputDialog, QMessageBox, QGraphicsItemGroup,
@@ -15,12 +16,16 @@ from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QPainterPath,
                          QPageSize, QPageLayout, QUndoStack, QUndoCommand, QCursor)
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewWidget, QPrinterInfo
 from PyQt6.QtSvg import QSvgGenerator
+
+import qtawesome as qta
+import qdarktheme
+import networkx as nx
+import openpyxl
 import ezdxf
 
 GRID_SIZE = 20
 
 class SceneStateCommand(QUndoCommand):
-    """シーン全体の状態を保存し、Undo/Redoを実行するコマンド"""
     def __init__(self, main_window, old_state, new_state, description):
         super().__init__(description)
         self.main_window = main_window
@@ -190,7 +195,7 @@ class EdgeTextItem(QGraphicsTextItem):
 
 
 class EdgeItem(QGraphicsPathItem):
-    def __init__(self, source_node, target_node, label="", width=2, style="solid"):
+    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight"):
         super().__init__()
         self.source_node = source_node
         self.target_node = target_node
@@ -200,6 +205,7 @@ class EdgeItem(QGraphicsPathItem):
         
         self.line_width = width
         self.line_style = style
+        self.routing = routing
         self.update_pen()
         
         self.setZValue(-1); self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
@@ -225,22 +231,39 @@ class EdgeItem(QGraphicsPathItem):
 
     def get_auto_text_pos(self):
         if not self.source_node or not self.target_node: return None
-        pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
-        if len(pts) < 2: return None
-        mid = len(pts) // 2
-        line = QLineF(pts[mid - 1], pts[mid])
-        c = line.center(); r = self.text_item.boundingRect()
-        if line.length() > 0:
-            nx, ny = line.dy() / line.length(), -line.dx() / line.length()
-            return QPointF(c.x() + nx*15 - r.width()/2, c.y() + ny*15 - r.height()/2)
-        return QPointF(c.x() - r.width()/2, c.y() - r.height()/2)
+        path = self.path()
+        if path.elementCount() < 2: return QPointF(0,0)
+        mid_element = path.elementAt(path.elementCount() // 2)
+        c = QPointF(mid_element.x, mid_element.y)
+        r = self.text_item.boundingRect()
+        return QPointF(c.x() - r.width()/2, c.y() - r.height()/2 - 15)
+
+    def _get_orthogonal_path(self, p1, p2):
+        path = QPainterPath(); path.moveTo(p1)
+        mid_y = (p1.y() + p2.y()) / 2
+        path.lineTo(p1.x(), mid_y)
+        path.lineTo(p2.x(), mid_y)
+        path.lineTo(p2)
+        return path
 
     def update_position(self):
         if not self.source_node or not self.target_node: return
         self.prepareGeometryChange()
+        
         pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
-        path = QPainterPath(); path.moveTo(pts[0])
-        for p in pts[1:]: path.lineTo(p)
+        path = QPainterPath()
+        
+        if self.routing == "orthogonal" and not self.waypoints:
+            path = self._get_orthogonal_path(pts[0], pts[-1])
+        else:
+            path.moveTo(pts[0])
+            for i in range(1, len(pts)):
+                if self.routing == "orthogonal":
+                    mid_y = (pts[i-1].y() + pts[i].y()) / 2
+                    path.lineTo(pts[i-1].x(), mid_y)
+                    path.lineTo(pts[i].x(), mid_y)
+                path.lineTo(pts[i])
+
         self.setPath(path)
         if self.raw_text:
             base = self.get_auto_text_pos()
@@ -257,7 +280,7 @@ class EdgeItem(QGraphicsPathItem):
 
     def mousePressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier: super().mousePressEvent(event); return
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and self.routing != "orthogonal":
             pos = event.scenePos()
             pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
             for i in range(len(pts) - 1):
@@ -285,7 +308,7 @@ class EdgeItem(QGraphicsPathItem):
             self.update_position(); self.scene().main_window.push_undo_state("ウェイポイント削除")
             
     def check_waypoint_straightness(self, wp):
-        if wp not in self.waypoints: return
+        if wp not in self.waypoints or self.routing == "orthogonal": return
         idx = self.waypoints.index(wp)
         p1 = self.source_node.scenePos() if idx == 0 else self.waypoints[idx - 1].scenePos()
         p2 = self.target_node.scenePos() if idx == len(self.waypoints) - 1 else self.waypoints[idx + 1].scenePos()
@@ -304,7 +327,7 @@ class FlowchartScene(QGraphicsScene):
         self.source_node = None
         self.items_ref = [] 
         self.preview_node = None
-        self.preview_items = []  # ペーストプレビュー用アイテム群
+        self.preview_items = []
 
     def hide_preview_node(self):
         try:
@@ -315,10 +338,8 @@ class FlowchartScene(QGraphicsScene):
             self.preview_items = []
 
     def update_preview_node(self, pos=None, tool=None):
-        if tool is None:
-            tool = self.main_window.current_tool
+        if tool is None: tool = self.main_window.current_tool
 
-        # 異なるツールへの切り替え時はクリーンアップ
         if tool not in ["process", "decision", "data", "terminal"]:
             try:
                 if self.preview_node:
@@ -329,42 +350,36 @@ class FlowchartScene(QGraphicsScene):
         if tool != "paste":
             try:
                 if self.preview_items:
-                    for pi in self.preview_items:
-                        self.removeItem(pi)
+                    for pi in self.preview_items: 
+                        if pi.scene() == self: self.removeItem(pi)
                     self.preview_items = []
             except RuntimeError: self.preview_items = []
 
-        # 新規ノード追加のプレビュー
         if tool in ["process", "decision", "data", "terminal"]:
             try:
                 if self.preview_node and self.preview_node.node_type != tool:
-                    self.removeItem(self.preview_node)
-                    self.preview_node = None
+                    self.removeItem(self.preview_node); self.preview_node = None
             except RuntimeError: self.preview_node = None
 
             if not self.preview_node:
                 self.preview_node = NodeItem(0, 0, text="Node", node_type=tool)
-                self.preview_node.setOpacity(0.5)
-                self.preview_node.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                self.preview_node.setOpacity(0.5); self.preview_node.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                 self.preview_node.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
-                self.preview_node.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
-                self.preview_node.setZValue(1000)
+                self.preview_node.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False); self.preview_node.setZValue(1000)
                 self.addItem(self.preview_node)
             try:
                 self.preview_node.show()
                 if pos is not None:
-                    snapped_x = round(pos.x() / GRID_SIZE) * GRID_SIZE
-                    snapped_y = round(pos.y() / GRID_SIZE) * GRID_SIZE
-                    self.preview_node.setPos(snapped_x, snapped_y)
+                    sx, sy = round(pos.x() / GRID_SIZE) * GRID_SIZE, round(pos.y() / GRID_SIZE) * GRID_SIZE
+                    self.preview_node.setPos(sx, sy)
             except RuntimeError: self.preview_node = None
 
-        # ペースト(コピーしたアイテム)のプレビュー
         elif tool == "paste" and self.main_window.clipboard_data:
             try:
                 if not self.preview_items:
                     id_map = {}
                     for n in self.main_window.clipboard_data.get("nodes", []):
-                        node = NodeItem(n["x"], n["y"], n["text"], n["type"], str(uuid.uuid4()), n["bg_color"], n["text_color"])
+                        node = NodeItem(n["x"], n["y"], n["text"], n["type"], str(uuid.uuid4()), n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"))
                         node.setOpacity(0.5); node.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                         node.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
                         node.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False); node.setZValue(1000)
@@ -373,10 +388,10 @@ class FlowchartScene(QGraphicsScene):
                     for e in self.main_window.clipboard_data.get("edges", []):
                         src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
                         if src and tgt:
-                            edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"))
+                            edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"))
                             edge.setOpacity(0.5); edge.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                             edge.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False); edge.setZValue(1000)
-                            if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e["text_offset"]["x"], e["text_offset"]["y"])
+                            if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
                             for w in e.get("waypoints", []):
                                 wp = WaypointItem(w["x"], w["y"], edge)
                                 wp.setOpacity(0.5); wp.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
@@ -386,21 +401,24 @@ class FlowchartScene(QGraphicsScene):
                             self.addItem(edge); self.preview_items.append(edge); edge.update_position()
                 
                 if pos is not None and self.main_window.clipboard_base_pos:
-                    snapped_x = round(pos.x() / GRID_SIZE) * GRID_SIZE
-                    snapped_y = round(pos.y() / GRID_SIZE) * GRID_SIZE
-                    dx = snapped_x - self.main_window.clipboard_base_pos.x()
-                    dy = snapped_y - self.main_window.clipboard_base_pos.y()
+                    sx, sy = round(pos.x() / GRID_SIZE) * GRID_SIZE, round(pos.y() / GRID_SIZE) * GRID_SIZE
+                    dx, dy = sx - self.main_window.clipboard_base_pos.x(), sy - self.main_window.clipboard_base_pos.y()
                     
                     for item in self.preview_items:
                         item.show()
-                        if isinstance(item, NodeItem) or isinstance(item, WaypointItem):
+                        if isinstance(item, NodeItem) or isinstance(item, WaypointItem): 
                             item.setPos(item.orig_x + dx, item.orig_y + dy)
+                            
+                    for item in self.preview_items:
+                        if isinstance(item, EdgeItem):
+                            item.update_position()
+                            
             except RuntimeError: self.preview_items = []
 
 
     def drawBackground(self, painter, rect):
         super().drawBackground(painter, rect)
-        painter.setPen(QPen(QColor(220, 220, 220), 1, Qt.PenStyle.SolidLine))
+        painter.setPen(QPen(QColor(200, 200, 200) if self.main_window.is_light_theme else QColor(60, 60, 60), 1, Qt.PenStyle.SolidLine))
         left, top = int(rect.left()) - (int(rect.left()) % GRID_SIZE), int(rect.top()) - (int(rect.top()) % GRID_SIZE)
         lines = [QLineF(x, rect.top(), x, rect.bottom()) for x in range(left, int(rect.right()), GRID_SIZE)]
         lines.extend([QLineF(rect.left(), y, rect.right(), y) for y in range(top, int(rect.bottom()), GRID_SIZE)])
@@ -413,9 +431,7 @@ class FlowchartScene(QGraphicsScene):
         if tool in ["process", "decision", "data", "terminal"] and event.button() == Qt.MouseButton.LeftButton:
             sx, sy = round(event.scenePos().x()/GRID_SIZE)*GRID_SIZE, round(event.scenePos().y()/GRID_SIZE)*GRID_SIZE
             node = NodeItem(sx, sy, text="Node", node_type=tool)
-            self.items_ref.append(node)
-            self.addItem(node)
-            self.main_window.push_undo_state(f"ノード追加 ({tool})")
+            self.items_ref.append(node); self.addItem(node); self.main_window.push_undo_state(f"ノード追加 ({tool})")
             return
 
         if tool == "connect" and event.button() == Qt.MouseButton.LeftButton:
@@ -426,7 +442,7 @@ class FlowchartScene(QGraphicsScene):
                     self.source_node = item; self.source_node.set_highlight(True)
                     self.main_window.statusBar().showMessage("エッジ接続モード: 2つ目のノードをクリック")
                 elif item != self.source_node:
-                    edge = EdgeItem(self.source_node, item)
+                    edge = EdgeItem(self.source_node, item, routing=self.main_window.cb_routing.currentData())
                     self.source_node.add_edge(edge); item.add_edge(edge)
                     self.items_ref.append(edge); self.addItem(edge)
                     self.source_node.set_highlight(False); self.source_node = None
@@ -437,44 +453,34 @@ class FlowchartScene(QGraphicsScene):
                 if self.source_node: self.source_node.set_highlight(False); self.source_node = None
                 return
 
-        # クリックしてペーストを実行
         if tool == "paste" and event.button() == Qt.MouseButton.LeftButton:
             if self.main_window.clipboard_data and self.main_window.clipboard_base_pos:
-                pos = event.scenePos()
-                snapped_x = round(pos.x() / GRID_SIZE) * GRID_SIZE
-                snapped_y = round(pos.y() / GRID_SIZE) * GRID_SIZE
-                dx = snapped_x - self.main_window.clipboard_base_pos.x()
-                dy = snapped_y - self.main_window.clipboard_base_pos.y()
-                
+                sx, sy = round(event.scenePos().x() / GRID_SIZE) * GRID_SIZE, round(event.scenePos().y() / GRID_SIZE) * GRID_SIZE
+                dx, dy = sx - self.main_window.clipboard_base_pos.x(), sy - self.main_window.clipboard_base_pos.y()
                 self.main_window.scene.clearSelection()
-                
-                # ペースト前にプレビューを消去
                 try:
-                    for pi in self.preview_items: self.removeItem(pi)
+                    for pi in self.preview_items: 
+                        if pi.scene() == self: self.removeItem(pi)
                 except RuntimeError: pass
                 self.preview_items = []
-                
                 self.main_window.load_scene_json(self.main_window.clipboard_data, offset_x=dx, offset_y=dy, clear_scene=False, generate_new_ids=True)
                 self.main_window.push_undo_state("貼り付け")
-                self.main_window.set_tool("select") # ペースト後は選択モードに戻る
+                self.main_window.set_tool("select")
+                self.main_window.btn_select.setChecked(True)
             return
 
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self.selectedItems(): self.main_window.is_moving = True
-        
         tool = self.main_window.current_tool
-        if tool in ["process", "decision", "data", "terminal", "paste"]:
-            self.update_preview_node(event.scenePos(), tool)
-            
+        if tool in ["process", "decision", "data", "terminal", "paste"]: self.update_preview_node(event.scenePos(), tool)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
         if getattr(self.main_window, 'is_moving', False):
-            self.main_window.push_undo_state("移動")
-            self.main_window.is_moving = False
+            self.main_window.push_undo_state("移動"); self.main_window.is_moving = False
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace): self.main_window.delete_selected_items()
@@ -533,7 +539,7 @@ class CustomPrintPreviewDialog(QDialog):
         h_scale = QHBoxLayout(); self.spin_scale = QDoubleSpinBox(); self.spin_scale.setRange(10, 1000); self.spin_scale.setValue(100); self.spin_scale.setEnabled(False)
         h_scale.addWidget(self.radio_custom); h_scale.addWidget(self.spin_scale); sc_layout.addWidget(self.radio_auto); sc_layout.addLayout(h_scale); scale_group.setLayout(sc_layout); settings_layout.addWidget(scale_group)
         
-        btn_layout = QVBoxLayout(); self.btn_print = QPushButton("🖨️ 印刷を実行"); self.btn_print.setStyleSheet("font-weight: bold; background-color: #DBEAFE; padding: 10px; color: #1D4ED8;")
+        btn_layout = QVBoxLayout(); self.btn_print = QPushButton("🖨️ 印刷を実行"); self.btn_print.setStyleSheet("font-weight: bold; padding: 10px;")
         self.btn_cancel = QPushButton("キャンセル"); btn_layout.addSpacing(20); btn_layout.addWidget(self.btn_print); btn_layout.addWidget(self.btn_cancel); settings_layout.addLayout(btn_layout)
         settings_layout.addStretch()
         
@@ -611,26 +617,87 @@ class MainWindow(QMainWindow):
         self.current_tool = "select"
         self.clipboard_data = None
         self.clipboard_base_pos = None
+        self.is_light_theme = True
         
         self.undo_stack = QUndoStack(self)
         self.last_state = {"nodes": [], "edges": [], "groups": []}
 
         self.scene = FlowchartScene(self)
-        self.scene.setBackgroundBrush(QBrush(Qt.GlobalColor.white))
         self.scene.setSceneRect(-2000, -2000, 4000, 4000)
 
         self.view = FlowchartView(self.scene)
         self.view.centerOn(0, 0)
         self.setCentralWidget(self.view)
 
+        self.icon_actions = []  # テーマ切り替え時のアイコン更新用リスト
         self.init_menu()
         self.init_toolbars()
+        self.apply_theme()  # 起動時に一括でテーマとアイコン色を適用
+        
         self.update_window_title()
         self.statusBar().showMessage("準備完了: 範囲選択や複数選択（Ctrlキー+クリック）が可能です")
 
+    def create_icon_action(self, icon_name, text, slot=None, shortcut=None, checkable=False):
+        """アイコン付きのアクションを生成し、リストに登録しておくヘルパーメソッド"""
+        act = QAction(text, self)
+        if shortcut: act.setShortcut(shortcut)
+        if checkable: act.setCheckable(True)
+        if slot: act.triggered.connect(slot)
+        self.icon_actions.append((act, icon_name))
+        return act
+
+    def apply_theme(self):
+        theme = "light" if self.is_light_theme else "dark"
+        app = QApplication.instance()
+        if app:
+            try:
+                if hasattr(qdarktheme, 'setup_theme'):
+                    qdarktheme.setup_theme(theme)
+                else:
+                    app.setStyleSheet(qdarktheme.load_stylesheet(theme))
+            except Exception as e:
+                print(f"Theme setup failed: {e}")
+        
+        # テーマに応じて文字色とホバー色を切り替える
+        text_color = "#212529" if self.is_light_theme else "#F8F9FA"
+        bg_hover = "#E2E6EA" if self.is_light_theme else "#495057"
+        
+        self.setStyleSheet(f"""
+            QToolBar {{ spacing: 6px; padding: 4px; border: none; }} 
+            QToolButton {{ font-size: 13px; padding: 6px 10px; border-radius: 4px; color: {text_color}; }} 
+            QToolButton:hover {{ background: {bg_hover}; }}
+            QToolButton:checked {{ background: #3B82F6; color: white; font-weight: bold; }} 
+        """)
+
+        # アイコンの色をテーマに合わせて更新
+        icon_color = '#212529' if self.is_light_theme else '#F8F9FA'
+        for act, icon_name in self.icon_actions:
+            if icon_name:
+                act.setIcon(qta.icon(icon_name, color=icon_color))
+
+        if self.is_light_theme:
+            self.scene.setBackgroundBrush(QBrush(QColor(255, 255, 255)))
+        else:
+            self.scene.setBackgroundBrush(QBrush(QColor(30, 30, 30)))
+        self.scene.update()
+
+    def toggle_theme(self):
+        self.is_light_theme = not self.is_light_theme
+        self.apply_theme()
+
     def get_scene_json(self, selected_only=False):
         data = {"nodes": [], "edges": [], "groups": []}
-        items = self.scene.selectedItems() if selected_only else self.scene.items()
+        items_raw = self.scene.selectedItems() if selected_only else self.scene.items()
+        
+        # グループが選択されている場合、その子アイテムも確実に取得対象に含める
+        items = set()
+        for it in items_raw:
+            items.add(it)
+            if type(it) == QGraphicsItemGroup:
+                for child in it.childItems():
+                    items.add(child)
+        items = list(items)
+
         valid_node_ids = set()
         
         for item in items:
@@ -642,7 +709,7 @@ class MainWindow(QMainWindow):
             if isinstance(item, EdgeItem) and item not in getattr(self.scene, 'preview_items', []):
                 if selected_only and (item.source_node.node_id not in valid_node_ids or item.target_node.node_id not in valid_node_ids): continue
                 offset = {"x": item.text_item.manual_offset.x(), "y": item.text_item.manual_offset.y()} if item.text_item.manual_offset else None
-                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
+                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
                 
         for item in items:
             if type(item) == QGraphicsItemGroup:
@@ -652,24 +719,21 @@ class MainWindow(QMainWindow):
 
     def load_scene_json(self, data, offset_x=0, offset_y=0, clear_scene=True, generate_new_ids=False, is_undo_redo=False):
         if clear_scene: 
-            self.scene.clear()
-            self.scene.items_ref.clear()
-            self.scene.preview_node = None
-            self.scene.preview_items = []
-            self.scene.source_node = None
+            self.scene.clear(); self.scene.items_ref.clear()
+            self.scene.preview_node = None; self.scene.preview_items = []; self.scene.source_node = None
             
         id_map = {}
         for n in data.get("nodes", []):
-            new_id = str(uuid.uuid4()) if generate_new_ids else n["id"]
-            node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n["bg_color"], n["text_color"])
-            self.scene.items_ref.append(node); self.scene.addItem(node); id_map[n["id"]] = node
+            new_id = str(uuid.uuid4()) if generate_new_ids else n.get("id", str(uuid.uuid4()))
+            node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"))
+            self.scene.items_ref.append(node); self.scene.addItem(node); id_map[n.get("id")] = node
             if not clear_scene: node.setSelected(True)
             
         for e in data.get("edges", []):
             src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
             if src and tgt:
-                edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"))
-                if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e["text_offset"]["x"], e["text_offset"]["y"])
+                edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"))
+                if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
                 for w in e.get("waypoints", []):
                     wp = WaypointItem(w["x"]+offset_x, w["y"]+offset_y, edge); edge.waypoints.append(wp); self.scene.items_ref.append(wp); self.scene.addItem(wp)
                 src.add_edge(edge); tgt.add_edge(edge); self.scene.items_ref.append(edge); self.scene.addItem(edge); edge.update_position()
@@ -680,8 +744,7 @@ class MainWindow(QMainWindow):
             if g_items:
                 group = self.scene.createItemGroup(g_items)
                 group.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
-                self.scene.items_ref.append(group)
-                if not clear_scene: group.setSelected(True)
+                self.scene.items_ref.append(group); getattr(group, 'setSelected', lambda x: None)(True if not clear_scene else False)
                 
         if not is_undo_redo: self.last_state = self.get_scene_json()
 
@@ -692,7 +755,7 @@ class MainWindow(QMainWindow):
             self.last_state = new_state
 
     def update_window_title(self):
-        base = "FlowchartCreationMiya v1.4.0"
+        base = "FlowchartCreationMiya Pro"
         self.setWindowTitle(f"{os.path.basename(self.current_filepath)} - {base}" if self.current_filepath else base)
 
     def init_menu(self):
@@ -701,70 +764,84 @@ class MainWindow(QMainWindow):
         for text, func, sc in [("上書き保存(&S)", self.save_file, "Ctrl+S"), ("名前を付けて保存(&A)...", self.save_file_as, "Ctrl+Shift+S"), ("読込(&O)", self.load_json, "Ctrl+O")]:
             act = QAction(text, self); act.setShortcut(sc); act.triggered.connect(func); file_menu.addAction(act)
         file_menu.addSeparator()
-        file_menu.addAction("エクスポート(&E)...", self.export_file); file_menu.addAction("Jw_cadへコピー(&C)", self.copy_to_jwcad); file_menu.addAction("印刷(&P)...", self.open_print_dialog)
+        act_excel = self.create_icon_action('fa5s.file-excel', "仕様書(Excel)生成...", self.generate_excel)
+        file_menu.addAction(act_excel)
+        file_menu.addSeparator()
+        file_menu.addAction("Draw.ioインポート(.xml)...", self.import_drawio)
+        file_menu.addAction("Draw.ioエクスポート(.xml)...", self.export_drawio)
+        file_menu.addSeparator()
+        file_menu.addAction("画像エクスポート(&E)...", self.export_file); file_menu.addAction("Jw_cadへコピー(&C)", self.copy_to_jwcad)
         file_menu.addSeparator(); file_menu.addAction("終了(&X)", self.close)
         
         edit_menu = menubar.addMenu("編集(&E)")
-        undo_act = self.undo_stack.createUndoAction(self, "元に戻す(&U)"); undo_act.setShortcut("Ctrl+Z"); edit_menu.addAction(undo_act)
-        redo_act = self.undo_stack.createRedoAction(self, "やり直し(&R)"); redo_act.setShortcut("Ctrl+Y"); edit_menu.addAction(redo_act)
+        self.act_undo = self.undo_stack.createUndoAction(self, "元に戻す(&U)")
+        self.act_undo.setShortcut("Ctrl+Z")
+        self.icon_actions.append((self.act_undo, 'fa5s.undo'))
+        edit_menu.addAction(self.act_undo)
+
+        self.act_redo = self.undo_stack.createRedoAction(self, "やり直し(&R)")
+        self.act_redo.setShortcut("Ctrl+Y")
+        self.icon_actions.append((self.act_redo, 'fa5s.redo'))
+        edit_menu.addAction(self.act_redo)
         edit_menu.addSeparator()
-        act_copy = QAction("コピー(&C)", self); act_copy.setShortcut("Ctrl+C"); act_copy.triggered.connect(self.copy_items); edit_menu.addAction(act_copy)
-        act_paste = QAction("貼り付け(&V)", self); act_paste.setShortcut("Ctrl+V"); act_paste.triggered.connect(self.paste_items); edit_menu.addAction(act_paste)
-        act_del = QAction("削除(&D)", self); act_del.setShortcut("Del"); act_del.triggered.connect(self.delete_selected_items); edit_menu.addAction(act_del)
+        
+        act_copy = self.create_icon_action('fa5s.copy', "コピー(&C)", self.copy_items, shortcut="Ctrl+C")
+        act_paste = self.create_icon_action('fa5s.paste', "貼り付け(&V)", self.paste_items, shortcut="Ctrl+V")
+        act_del = self.create_icon_action('fa5s.trash-alt', "削除(&D)", self.delete_selected_items, shortcut="Del")
+        edit_menu.addAction(act_copy); edit_menu.addAction(act_paste); edit_menu.addAction(act_del)
         edit_menu.addSeparator()
+        
         act_grp = QAction("グループ化(&G)", self); act_grp.setShortcut("Ctrl+G"); act_grp.triggered.connect(self.group_selected); edit_menu.addAction(act_grp)
         act_ungrp = QAction("グループ解除(&U)", self); act_ungrp.setShortcut("Ctrl+Shift+G"); act_ungrp.triggered.connect(self.ungroup_selected); edit_menu.addAction(act_ungrp)
         
         arr_menu = menubar.addMenu("配置(&A)")
+        act_layout = self.create_icon_action('fa5s.sitemap', "★自動階層レイアウト", self.auto_layout_networkx)
+        arr_menu.addAction(act_layout)
+        arr_menu.addSeparator()
         for txt, mode in [("左揃え", "left"), ("左右中央揃え", "center_x"), ("右揃え", "right"), ("上揃え", "top"), ("上下中央揃え", "center_y"), ("下揃え", "bottom"), ("水平等間隔", "dist_h"), ("垂直等間隔", "dist_v")]:
             act = QAction(txt, self); act.triggered.connect(lambda chk, m=mode: self.align_items(m)); arr_menu.addAction(act)
 
-        help_menu = menubar.addMenu("ヘルプ(&H)")
-        help_menu.addAction("使い方(&U)", self.show_usage); help_menu.addAction("バージョン情報(&A)", self.show_about)
-
-    def show_usage(self):
-        msg = ("【新機能】\n・図形の追従プレビュー: ノード追加時や、コピー＆ペースト時、カーソルにゴーストが追従します。\n"
-               "・Undo/Redo: Ctrl+Z / Ctrl+Y\n・コピー＆ペースト: Ctrl+C でコピーし、キャンバスをクリックしてペースト\n・グループ化: Ctrl+G / 解除: Ctrl+Shift+G\n"
-               "・整列: 複数選択して上部メニューの「配置」から実行\n・線のスタイル: エッジを選択して「書式ツールバー」で太さや破線を変更\n\n"
-               "【基本操作】\n・選択/追加/接続: メインツールバーから\n・削除: Deleteキー または ツールバーボタン")
-        QMessageBox.information(self, "使い方", msg)
-
-    def show_about(self): QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.4.0\nPython & PyQt6 製フローチャート作成ツール")
+        view_menu = menubar.addMenu("表示(&V)")
+        act_theme = self.create_icon_action('fa5s.adjust', "テーマ切り替え (Light/Dark)", self.toggle_theme)
+        view_menu.addAction(act_theme)
 
     def init_toolbars(self):
-        ss = """
-            QToolBar { background: #F8F9FA; spacing: 4px; padding: 4px; border-bottom: 1px solid #DEE2E6; } 
-            QToolButton { font-size: 13px; padding: 4px 8px; border-radius: 4px; color: #212529; background: transparent; } 
-            QToolButton:hover { background: #E2E6EA; }
-            QToolButton:checked { background: #DBEAFE; color: #1D4ED8; font-weight: bold; border: 1px solid #93C5FD; } 
-            QLabel { font-size: 13px; font-weight: bold; color: #495057; padding: 0 4px; }
-        """
-        
-        tb_main = QToolBar("メインツール"); tb_main.setStyleSheet(ss); self.addToolBar(tb_main)
+        tb_main = QToolBar("メインツール"); self.addToolBar(tb_main)
         self.action_group = QActionGroup(self)
-        self.btn_select = tb_main.addAction("👆 選択"); self.btn_select.setCheckable(True); self.btn_select.setChecked(True)
-        self.btn_select.triggered.connect(lambda: self.set_tool("select")); self.action_group.addAction(self.btn_select)
-        tb_main.addSeparator(); tb_main.addWidget(QLabel("➕ 追加:"))
-        for name, key in [("⬛ 処理", "process"), ("◆ 分岐", "decision"), ("▱ データ", "data"), ("⬭ 端子", "terminal")]:
-            act = tb_main.addAction(name); act.setCheckable(True); act.triggered.connect(lambda chk, k=key: self.set_tool(k)); self.action_group.addAction(act)
+        self.btn_select = self.create_icon_action('fa5s.mouse-pointer', "選択", lambda: self.set_tool("select"), checkable=True)
+        self.btn_select.setChecked(True)
+        tb_main.addAction(self.btn_select)
+        self.action_group.addAction(self.btn_select)
         tb_main.addSeparator()
-        act_conn = tb_main.addAction("🔗 エッジ接続"); act_conn.setCheckable(True); act_conn.triggered.connect(lambda: self.set_tool("connect")); self.action_group.addAction(act_conn)
+        
+        for icon_name, text, key in [("fa5s.square", "処理", "process"), ("fa5s.code-branch", "分岐", "decision"), ("fa5s.layer-group", "データ", "data"), ("fa5s.capsules", "端子", "terminal")]:
+            act = self.create_icon_action(icon_name, text, lambda chk, k=key: self.set_tool(k), checkable=True)
+            tb_main.addAction(act); self.action_group.addAction(act)
+        
+        tb_main.addSeparator()
+        act_conn = self.create_icon_action('fa5s.link', "接続", lambda: self.set_tool("connect"), checkable=True)
+        tb_main.addAction(act_conn); self.action_group.addAction(act_conn)
 
-        tb_edit = QToolBar("編集"); tb_edit.setStyleSheet(ss); self.addToolBar(tb_edit)
-        tb_edit.addAction(self.undo_stack.createUndoAction(self, "↩️ 戻す")); tb_edit.addAction(self.undo_stack.createRedoAction(self, "↪️ 進む")); tb_edit.addSeparator()
-        tb_edit.addAction("📄 コピー", self.copy_items); tb_edit.addAction("📋 ペースト", self.paste_items); tb_edit.addAction("🗑️ 削除", self.delete_selected_items)
-        tb_edit.addSeparator(); tb_edit.addAction("🔍 拡大", self.zoom_in); tb_edit.addAction("🔍 縮小", self.zoom_out); tb_edit.addAction("🔍 100%", self.zoom_reset)
-
+        tb_edit = QToolBar("編集"); self.addToolBar(tb_edit)
+        tb_edit.addAction(self.act_undo)
+        tb_edit.addAction(self.act_redo)
+        tb_edit.addSeparator()
+        # メニューで作ったアクションをツールバーにも流用
+        for act, _ in self.icon_actions:
+            if act.text() in ["コピー(&C)", "貼り付け(&V)", "削除(&D)"]:
+                tb_edit.addAction(act)
+        
         self.addToolBarBreak()
 
-        tb_style = QToolBar("書式"); tb_style.setStyleSheet(ss); self.addToolBar(tb_style)
-        tb_style.addAction("🎨 背景色", self.change_bg_color); tb_style.addAction("🔠 文字色", self.change_text_color); tb_style.addSeparator()
-        tb_style.addWidget(QLabel("線幅:"))
-        self.cb_width = QComboBox(); self.cb_width.setStyleSheet("color: #212529; background: white;"); self.cb_width.addItems(["1", "2", "3", "4", "5"]); self.cb_width.setCurrentText("2"); self.cb_width.currentTextChanged.connect(self.change_edge_style)
-        tb_style.addWidget(self.cb_width)
-        tb_style.addWidget(QLabel("線種:"))
-        self.cb_style = QComboBox(); self.cb_style.setStyleSheet("color: #212529; background: white;"); self.cb_style.addItems(["実線(solid)", "破線(dash)", "点線(dot)"]); self.cb_style.currentTextChanged.connect(self.change_edge_style)
-        tb_style.addWidget(self.cb_style)
+        tb_style = QToolBar("書式"); self.addToolBar(tb_style)
+        act_bg = self.create_icon_action('fa5s.fill-drip', "背景", self.change_bg_color)
+        act_fg = self.create_icon_action('fa5s.font', "文字色", self.change_text_color)
+        tb_style.addAction(act_bg)
+        tb_style.addAction(act_fg)
+        tb_style.addSeparator()
+        tb_style.addWidget(QLabel("線幅:")); self.cb_width = QComboBox(); self.cb_width.addItems(["1", "2", "3", "4", "5"]); self.cb_width.setCurrentText("2"); self.cb_width.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_width)
+        tb_style.addWidget(QLabel("線種:")); self.cb_style = QComboBox(); self.cb_style.addItems(["実線(solid)", "破線(dash)", "点線(dot)"]); self.cb_style.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_style)
+        tb_style.addWidget(QLabel("ルート:")); self.cb_routing = QComboBox(); self.cb_routing.addItems(["直線", "直角(Orthogonal)"]); self.cb_routing.setItemData(0, "straight"); self.cb_routing.setItemData(1, "orthogonal"); self.cb_routing.currentIndexChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_routing)
 
     def set_tool(self, tool_name):
         self.current_tool = tool_name
@@ -774,47 +851,166 @@ class MainWindow(QMainWindow):
             self.view.setDragMode(QGraphicsView.DragMode.RubberBandDrag); self.view.setCursor(Qt.CursorShape.ArrowCursor); self.statusBar().showMessage("準備完了")
             self.scene.update_preview_node(None, tool_name)
         elif tool_name == "connect": 
-            self.view.setDragMode(QGraphicsView.DragMode.NoDrag); self.view.setCursor(Qt.CursorShape.CrossCursor); self.statusBar().showMessage("エッジ接続モード: 1つ目のノードをクリック")
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag); self.view.setCursor(Qt.CursorShape.CrossCursor); self.statusBar().showMessage("エッジ接続: 1つ目のノードをクリック")
             self.scene.update_preview_node(None, tool_name)
         elif tool_name == "paste":
-            self.view.setDragMode(QGraphicsView.DragMode.NoDrag); self.view.setCursor(Qt.CursorShape.CrossCursor); self.statusBar().showMessage("ペーストモード: クリックしてアイテムを配置")
-            self.btn_select.setChecked(False) # 選択ボタンのハイライトを外す
-            
-            global_pos = QCursor.pos()
-            view_pos = self.view.mapFromGlobal(global_pos)
-            if self.view.rect().contains(view_pos):
-                self.scene.update_preview_node(self.view.mapToScene(view_pos), tool_name)
-            else:
-                self.scene.update_preview_node(None, tool_name)
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag); self.view.setCursor(Qt.CursorShape.CrossCursor); self.statusBar().showMessage("ペーストモード")
+            # ペースト中は直感的にプレビューを即座に表示
+            g_pos = QCursor.pos(); v_pos = self.view.mapFromGlobal(g_pos)
+            if self.view.rect().contains(v_pos): self.scene.update_preview_node(self.view.mapToScene(v_pos), tool_name)
         else: 
-            self.view.setDragMode(QGraphicsView.DragMode.NoDrag); self.view.setCursor(Qt.CursorShape.CrossCursor); self.statusBar().showMessage("ノード配置モード: クリックして配置")
+            self.view.setDragMode(QGraphicsView.DragMode.NoDrag); self.view.setCursor(Qt.CursorShape.CrossCursor); self.statusBar().showMessage(f"配置モード: {tool_name}")
+            g_pos = QCursor.pos(); v_pos = self.view.mapFromGlobal(g_pos)
+            if self.view.rect().contains(v_pos): self.scene.update_preview_node(self.view.mapToScene(v_pos), tool_name)
+
+    def auto_layout_networkx(self):
+        data = self.get_scene_json()
+        if not data["nodes"]: return
+
+        G = nx.DiGraph()
+        for n in data["nodes"]: G.add_node(n["id"])
+        for e in data["edges"]: G.add_edge(e["source"], e["target"])
+
+        try:
+            for layer, nodes in enumerate(nx.topological_generations(G) if nx.is_directed_acyclic_graph(G) else [list(G.nodes)]):
+                for node in nodes:
+                    G.nodes[node]["layer"] = layer
+            pos = nx.multipartite_layout(G, subset_key="layer", align="horizontal")
             
-            global_pos = QCursor.pos()
-            view_pos = self.view.mapFromGlobal(global_pos)
-            if self.view.rect().contains(view_pos):
-                self.scene.update_preview_node(self.view.mapToScene(view_pos), tool_name)
-            else:
-                self.scene.update_preview_node(None, tool_name)
+            x_scale, y_scale = 200, 150
+            for i in self.scene.items():
+                if isinstance(i, NodeItem) and i.node_id in pos:
+                    p = pos[i.node_id]
+                    sx, sy = round(p[0]*x_scale/GRID_SIZE)*GRID_SIZE, round(p[1]*y_scale/GRID_SIZE)*GRID_SIZE
+                    i.setPos(sx, sy)
+            self.push_undo_state("自動レイアウト")
+            QMessageBox.information(self, "完了", "自動レイアウトが完了しました。")
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"自動レイアウトに失敗しました。\n{e}")
+
+    def generate_excel(self):
+        path, _ = QFileDialog.getSaveFileName(self, "仕様書(Excel)生成", "", "Excel Files (*.xlsx)")
+        if not path: return
+        
+        data = self.get_scene_json()
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Flowchart Specifications"
+        
+        headers = ["Step", "Node ID", "Type", "Text", "Next Steps"]
+        for col, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.font = openpyxl.styles.Font(bold=True)
+
+        id_to_node = {n["id"]: n for n in data["nodes"]}
+        edges_from = {}
+        for e in data["edges"]:
+            edges_from.setdefault(e["source"], []).append(e["target"])
+
+        row = 2
+        for i, n in enumerate(data["nodes"], 1):
+            next_ids = edges_from.get(n["id"], [])
+            next_texts = [id_to_node[nid]["text"].replace('\n', ' ') for nid in next_ids if nid in id_to_node]
+            ws.cell(row=row, column=1, value=i)
+            ws.cell(row=row, column=2, value=n["id"])
+            ws.cell(row=row, column=3, value=n["type"])
+            ws.cell(row=row, column=4, value=n["text"])
+            ws.cell(row=row, column=5, value=", ".join(next_texts))
+            row += 1
+
+        try:
+            wb.save(path)
+            QMessageBox.information(self, "完了", f"仕様書を生成しました:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"保存に失敗しました:\n{e}")
+
+    def import_drawio(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Draw.io インポート", "", "XML Files (*.xml *.drawio)")
+        if not path: return
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+            
+            self.scene.clear(); self.scene.items_ref.clear()
+            id_map = {}
+            for cell in root.iter('mxCell'):
+                cid = cell.get('id')
+                geom = cell.find('mxGeometry')
+                if geom is None: continue
+                
+                if cell.get('edge') == '1':
+                    src, tgt = cell.get('source'), cell.get('target')
+                    if src in id_map and tgt in id_map:
+                        edge = EdgeItem(id_map[src], id_map[tgt], cell.get('value', ''), 2, "solid", "orthogonal")
+                        self.scene.items_ref.append(edge); self.scene.addItem(edge); edge.update_position()
+                elif cell.get('vertex') == '1':
+                    x, y = float(geom.get('x', 0)), float(geom.get('y', 0))
+                    txt = cell.get('value', '').replace('&lt;br&gt;', '\n').replace('<br>', '\n')
+                    style = cell.get('style', '')
+                    ntype = "process"
+                    if "rhombus" in style: ntype = "decision"
+                    elif "ellipse" in style: ntype = "terminal"
+                    node = NodeItem(x, y, txt, ntype, cid)
+                    self.scene.items_ref.append(node); self.scene.addItem(node); id_map[cid] = node
+
+            self.last_state = self.get_scene_json()
+            QMessageBox.information(self, "完了", "Draw.ioファイルのインポートが完了しました。")
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"読み込みに失敗しました:\n{e}")
+
+    def export_drawio(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Draw.io エクスポート", "", "XML Files (*.xml)")
+        if not path: return
+        data = self.get_scene_json()
+        
+        mxfile = ET.Element('mxfile')
+        diagram = ET.SubElement(mxfile, 'diagram', id=str(uuid.uuid4()), name="Page-1")
+        mxGraphModel = ET.SubElement(diagram, 'mxGraphModel', dx="1000", dy="1000", grid="1", gridSize="20", guides="1", tooltips="1", connect="1", arrows="1", fold="1", page="1", pageScale="1", pageWidth="827", pageHeight="1169", math="0", shadow="0")
+        root = ET.SubElement(mxGraphModel, 'root')
+        ET.SubElement(root, 'mxCell', id="0")
+        ET.SubElement(root, 'mxCell', id="1", parent="0")
+
+        for n in data["nodes"]:
+            style = "rounded=0;whiteSpace=wrap;html=1;"
+            if n["type"] == "decision": style = "rhombus;whiteSpace=wrap;html=1;"
+            elif n["type"] == "terminal": style = "ellipse;whiteSpace=wrap;html=1;"
+            elif n["type"] == "data": style = "shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;"
+            
+            cell = ET.SubElement(root, 'mxCell', id=n["id"], value=n["text"].replace('\n', '<br>'), style=style, vertex="1", parent="1")
+            ET.SubElement(cell, 'mxGeometry', x=str(n["x"]-50), y=str(n["y"]-25), width="100", height="50", **{'as': 'geometry'})
+
+        for i, e in enumerate(data["edges"]):
+            style = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" if e.get("routing")=="orthogonal" else "html=1;"
+            cell = ET.SubElement(root, 'mxCell', id=f"edge_{i}", value=e.get("label", ""), style=style, edge="1", parent="1", source=e["source"], target=e["target"])
+            ET.SubElement(cell, 'mxGeometry', relative="1", **{'as': 'geometry'})
+
+        tree = ET.ElementTree(mxfile)
+        try:
+            tree.write(path, encoding='utf-8', xml_declaration=True)
+            QMessageBox.information(self, "完了", f"Draw.io形式でエクスポートしました。\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", str(e))
 
     def copy_items(self):
         sel_items = self.scene.selectedItems()
         if not sel_items: return
-        self.clipboard_data = self.get_scene_json(selected_only=True)
         
+        self.clipboard_data = self.get_scene_json(selected_only=True)
         nodes_data = self.clipboard_data.get("nodes", [])
         if nodes_data:
-            min_x = min(n["x"] for n in nodes_data)
-            min_y = min(n["y"] for n in nodes_data)
-            self.clipboard_base_pos = QPointF(min_x, min_y)
+            self.clipboard_base_pos = QPointF(min(n["x"] for n in nodes_data), min(n["y"] for n in nodes_data))
+            self.statusBar().showMessage("コピーしました（クリックで配置）", 3000)
+            
+            # コピー元のアイテムを引きずらないように選択を解除する
+            self.scene.clearSelection()
+            self.set_tool("paste")
         else:
             self.clipboard_base_pos = QPointF(0, 0)
-            
-        self.statusBar().showMessage("アイテムをコピーしました（クリックして配置）", 3000)
-        self.set_tool("paste")
+            self.statusBar().showMessage("コピーに失敗しました（ノードが含まれていません）", 3000)
 
     def paste_items(self):
-        if not self.clipboard_data or not self.clipboard_data.get("nodes"): return
-        self.set_tool("paste")
+        if self.clipboard_data and self.clipboard_data.get("nodes"): 
+            self.set_tool("paste")
 
     def group_selected(self):
         items = [i for i in self.scene.selectedItems() if isinstance(i, NodeItem) and i.parentItem() is None]
@@ -865,7 +1061,8 @@ class MainWindow(QMainWindow):
         edges = [i for i in self.scene.selectedItems() if isinstance(i, EdgeItem)]
         if not edges: return
         w = int(self.cb_width.currentText()); s = self.cb_style.currentText().split("(")[1].replace(")","")
-        for e in edges: e.line_width = w; e.line_style = s; e.update_pen()
+        r = self.cb_routing.currentData()
+        for e in edges: e.line_width = w; e.line_style = s; e.routing = r; e.update_pen(); e.update_position()
         self.push_undo_state("線のスタイル変更")
 
     def delete_selected_items(self):
@@ -905,15 +1102,13 @@ class MainWindow(QMainWindow):
 
     def save_file_as(self):
         path, _ = QFileDialog.getSaveFileName(self, "名前を付けて保存", "", "JSON Files (*.json)")
-        if path:
-            self.current_filepath = path; self.save_file(); self.update_window_title()
+        if path: self.current_filepath = path; self.save_file(); self.update_window_title()
 
     def load_json(self):
         path, _ = QFileDialog.getOpenFileName(self, "読込", "", "JSON Files (*.json)")
         if path:
             with open(path, 'r', encoding='utf-8') as f: data = json.load(f)
-            self.load_scene_json(data); self.undo_stack.clear(); self.last_state = self.get_scene_json()
-            self.current_filepath = path; self.update_window_title()
+            self.load_scene_json(data); self.undo_stack.clear(); self.last_state = self.get_scene_json(); self.current_filepath = path; self.update_window_title()
 
     def export_file(self):
         path, _ = QFileDialog.getSaveFileName(self, "エクスポート", "", "PNG Files (*.png);;JPEG Files (*.jpeg *.jpg);;SVG Files (*.svg);;DXF Files (*.dxf)")
@@ -921,13 +1116,10 @@ class MainWindow(QMainWindow):
         self.scene.clearSelection(); rect = self.scene.itemsBoundingRect().adjusted(-20, -20, 20, 20)
         hidden = []
         for i in self.scene.items():
-            is_preview = False
             try:
-                if i == getattr(self.scene, 'preview_node', None) or i in getattr(self.scene, 'preview_items', []): is_preview = True
+                if (isinstance(i, WaypointItem) or i == getattr(self.scene, 'preview_node', None) or i in getattr(self.scene, 'preview_items', [])) and i.isVisible():
+                    i.hide(); hidden.append(i)
             except RuntimeError: pass
-            if (isinstance(i, WaypointItem) or is_preview) and i.isVisible():
-                i.hide(); hidden.append(i)
-                
         if not rect.isEmpty():
             if path.endswith(('.png', '.jpg', '.jpeg')):
                 img = QImage(rect.size().toSize(), QImage.Format.Format_ARGB32); img.fill(Qt.GlobalColor.white)
@@ -1001,9 +1193,13 @@ class MainWindow(QMainWindow):
                     ls = item.raw_text.split('\n'); sy = my + (len(ls)-1)*6
                     for i, l in enumerate(ls): wc = sum(2 if unicodedata.east_asian_width(c) in 'FWA' else 1 for c in l); td.append(f'ch {mx-wc*2.5} {sy-i*12-5.0} 10 0 "{l}')
         QApplication.clipboard().setText('\r\n'.join(td) + '\r\n')
-        QMessageBox.information(self, "完了", "Jw_cad形式でコピーしました。")
+        QMessageBox.information(self, "完了", "Jw_cad用のデータをクリップボードにコピーしました。\nJw_cadを開いて「編集」→「貼り付け (Ctrl+V)」を実行してください。")
 
-    def open_print_dialog(self): CustomPrintPreviewDialog(self, len(self.scene.selectedItems()) > 0).exec()
+    def open_print_dialog(self): 
+        CustomPrintPreviewDialog(self, len(self.scene.selectedItems()) > 0).exec()
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv); window = MainWindow(); window.showMaximized(); sys.exit(app.exec())
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.showMaximized()
+    sys.exit(app.exec())
