@@ -37,7 +37,7 @@ jobs:
         --name "FlowchartCreationMiya-v1.2.0" 
         --add-data "README.md;."
         --collect-all PyQt6
-        app.pyw
+        app.py
 
     # 完成したexeファイルをGitHub上にアップロード
     - name: Upload Artifact
