@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsScene, QGraphic
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QMarginsF
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QPainterPath, 
                          QTransform, QPainterPathStroker, QAction, QActionGroup,
-                         QPageSize, QPageLayout, QUndoStack, QUndoCommand, QCursor)
+                         QPageSize, QPageLayout, QUndoStack, QUndoCommand, QCursor, QPolygonF)
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewWidget, QPrinterInfo
 from PyQt6.QtSvg import QSvgGenerator
 
@@ -198,7 +198,7 @@ class EdgeTextItem(QGraphicsTextItem):
 
 
 class EdgeItem(QGraphicsPathItem):
-    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight"):
+    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight", arrow="none"):
         super().__init__()
         self.source_node = source_node
         self.target_node = target_node
@@ -209,6 +209,7 @@ class EdgeItem(QGraphicsPathItem):
         self.line_width = width
         self.line_style = style
         self.routing = routing
+        self.arrow = arrow
         self.update_pen()
         
         self.setZValue(-1); self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
@@ -263,8 +264,11 @@ class EdgeItem(QGraphicsPathItem):
         pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
         path = QPainterPath()
         
+        p_before_end = pts[0]
+        
         if self.routing == "orthogonal" and not self.waypoints:
             path = self._get_orthogonal_path(pts[0], pts[-1])
+            p_before_end = QPointF(pts[-1].x(), (pts[0].y() + pts[-1].y()) / 2)
         else:
             path.moveTo(pts[0])
             for i in range(1, len(pts)):
@@ -272,9 +276,19 @@ class EdgeItem(QGraphicsPathItem):
                     mid_y = (pts[i-1].y() + pts[i].y()) / 2
                     path.lineTo(pts[i-1].x(), mid_y)
                     path.lineTo(pts[i].x(), mid_y)
+                    if i == len(pts) - 1:
+                        p_before_end = QPointF(pts[i].x(), mid_y)
+                else:
+                    if i == len(pts) - 1:
+                        p_before_end = pts[i-1]
                 path.lineTo(pts[i])
 
         self.setPath(path)
+        
+        # 矢印計算用に直前のポイントとターゲットノード表面のポイントを記録
+        self.arrow_p1 = p_before_end
+        self.arrow_p2 = clip_line_to_node(p_before_end, pts[-1], self.target_node)
+        
         if self.raw_text:
             base = self.get_auto_text_pos()
             if base is not None: self.text_item.setPos(base + self.text_item.manual_offset if self.text_item.manual_offset else base)
@@ -282,6 +296,20 @@ class EdgeItem(QGraphicsPathItem):
     def paint(self, painter, option, widget=None):
         painter.setPen(QPen(QColor("#3B82F6"), max(3, self.line_width)) if self.isSelected() else self.default_pen)
         painter.drawPath(self.path())
+        
+        if self.arrow == "end" and hasattr(self, 'arrow_p1') and hasattr(self, 'arrow_p2'):
+            angle = math.atan2(self.arrow_p2.y() - self.arrow_p1.y(), self.arrow_p2.x() - self.arrow_p1.x())
+            arrow_size = 12 + self.line_width * 1.5
+            
+            arrow_p1 = self.arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size,
+                                               math.sin(angle + math.pi / 6) * arrow_size)
+            arrow_p2 = self.arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size,
+                                               math.sin(angle - math.pi / 6) * arrow_size)
+            
+            painter.setBrush(QBrush(QColor("#3B82F6") if self.isSelected() else self.default_pen.color()))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPolygon(QPolygonF([self.arrow_p2, arrow_p1, arrow_p2]))
+            
         if self.isSelected():
             painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QBrush(QColor("#3B82F6")))
             pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
@@ -405,7 +433,7 @@ class FlowchartScene(QGraphicsScene):
                     for e in self.main_window.clipboard_data.get("edges", []):
                         src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
                         if src and tgt:
-                            edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"))
+                            edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "none"))
                             edge.setOpacity(0.5); edge.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                             edge.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False); edge.setZValue(1000)
                             if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
@@ -459,7 +487,7 @@ class FlowchartScene(QGraphicsScene):
                     self.source_node = item; self.source_node.set_highlight(True)
                     self.main_window.statusBar().showMessage("エッジ接続モード: 2つ目のノードをクリック")
                 elif item != self.source_node:
-                    edge = EdgeItem(self.source_node, item, routing=self.main_window.cb_routing.currentData())
+                    edge = EdgeItem(self.source_node, item, routing=self.main_window.cb_routing.currentData(), arrow=self.main_window.cb_arrow.currentData())
                     self.source_node.add_edge(edge); item.add_edge(edge)
                     self.items_ref.append(edge); self.addItem(edge)
                     self.source_node.set_highlight(False); self.source_node = None
@@ -722,7 +750,7 @@ class MainWindow(QMainWindow):
             if isinstance(item, EdgeItem) and item not in getattr(self.scene, 'preview_items', []):
                 if selected_only and (item.source_node.node_id not in valid_node_ids or item.target_node.node_id not in valid_node_ids): continue
                 offset = {"x": item.text_item.manual_offset.x(), "y": item.text_item.manual_offset.y()} if item.text_item.manual_offset else None
-                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
+                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "arrow": item.arrow, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
                 
         for item in items:
             if type(item) == QGraphicsItemGroup:
@@ -745,7 +773,7 @@ class MainWindow(QMainWindow):
         for e in data.get("edges", []):
             src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
             if src and tgt:
-                edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"))
+                edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "none"))
                 if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
                 for w in e.get("waypoints", []):
                     wp = WaypointItem(w["x"]+offset_x, w["y"]+offset_y, edge); edge.waypoints.append(wp); self.scene.items_ref.append(wp); self.scene.addItem(wp)
@@ -768,7 +796,7 @@ class MainWindow(QMainWindow):
             self.last_state = new_state
 
     def update_window_title(self):
-        base = "FlowchartCreationMiya v1.2.0"
+        base = "FlowchartCreationMiya v1.3.0"
         self.setWindowTitle(f"{os.path.basename(self.current_filepath)} - {base}" if self.current_filepath else base)
 
     def init_menu(self):
@@ -828,12 +856,12 @@ class MainWindow(QMainWindow):
                "・コピー＆ペースト: Ctrl+Cでコピーし、キャンバスをクリックして配置\n"
                "・グループ化: Ctrl+G / 解除: Ctrl+Shift+G\n"
                "・整列 / 自動レイアウト: 複数選択して上部メニューの「配置」から実行\n"
-               "・線のスタイル: エッジを選択して「書式ツールバー」で太さや直角配線を変更\n\n"
+               "・線のスタイル: エッジを選択して「書式ツールバー」で太さや直角配線、矢印の有無を変更\n\n"
                "・Jw_cad連携 / 仕様書生成 / Draw.io互換 は「ファイル」メニューから実行可能です。")
         QMessageBox.information(self, "使い方", msg)
 
     def show_about(self): 
-        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.2.0\nPython & PyQt6 製フローチャート作成ツール")
+        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.3.0\nPython & PyQt6 製フローチャート作成ツール")
 
     def init_toolbars(self):
         tb_main = QToolBar("メインツール"); self.addToolBar(tb_main)
@@ -871,6 +899,7 @@ class MainWindow(QMainWindow):
         tb_style.addWidget(QLabel("線幅:")); self.cb_width = QComboBox(); self.cb_width.addItems(["1", "2", "3", "4", "5"]); self.cb_width.setCurrentText("2"); self.cb_width.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_width)
         tb_style.addWidget(QLabel("線種:")); self.cb_style = QComboBox(); self.cb_style.addItems(["実線(solid)", "破線(dash)", "点線(dot)"]); self.cb_style.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_style)
         tb_style.addWidget(QLabel("ルート:")); self.cb_routing = QComboBox(); self.cb_routing.addItems(["直線", "直角(Orthogonal)"]); self.cb_routing.setItemData(0, "straight"); self.cb_routing.setItemData(1, "orthogonal"); self.cb_routing.currentIndexChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_routing)
+        tb_style.addWidget(QLabel("終端:")); self.cb_arrow = QComboBox(); self.cb_arrow.addItems(["なし", "矢印"]); self.cb_arrow.setItemData(0, "none"); self.cb_arrow.setItemData(1, "end"); self.cb_arrow.currentIndexChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_arrow)
 
     def set_tool(self, tool_name):
         self.current_tool = tool_name
@@ -969,7 +998,9 @@ class MainWindow(QMainWindow):
                 if cell.get('edge') == '1':
                     src, tgt = cell.get('source'), cell.get('target')
                     if src in id_map and tgt in id_map:
-                        edge = EdgeItem(id_map[src], id_map[tgt], cell.get('value', ''), 2, "solid", "orthogonal")
+                        style = cell.get('style', '')
+                        arrow_style = "none" if "endArrow=none" in style else "end"
+                        edge = EdgeItem(id_map[src], id_map[tgt], cell.get('value', ''), 2, "solid", "orthogonal", arrow_style)
                         self.scene.items_ref.append(edge); self.scene.addItem(edge); edge.update_position()
                 elif cell.get('vertex') == '1':
                     x, y = float(geom.get('x', 0)), float(geom.get('y', 0))
@@ -1009,6 +1040,8 @@ class MainWindow(QMainWindow):
 
         for i, e in enumerate(data["edges"]):
             style = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" if e.get("routing")=="orthogonal" else "html=1;"
+            if e.get("arrow") == "none": style += "endArrow=none;"
+            else: style += "endArrow=classic;"
             cell = ET.SubElement(root, 'mxCell', id=f"edge_{i}", value=e.get("label", ""), style=style, edge="1", parent="1", source=e["source"], target=e["target"])
             ET.SubElement(cell, 'mxGeometry', relative="1", **{'as': 'geometry'})
 
@@ -1089,7 +1122,8 @@ class MainWindow(QMainWindow):
         if not edges: return
         w = int(self.cb_width.currentText()); s = self.cb_style.currentText().split("(")[1].replace(")","")
         r = self.cb_routing.currentData()
-        for e in edges: e.line_width = w; e.line_style = s; e.routing = r; e.update_pen(); e.update_position()
+        a = self.cb_arrow.currentData()
+        for e in edges: e.line_width = w; e.line_style = s; e.routing = r; e.arrow = a; e.update_pen(); e.update_position()
         self.push_undo_state("線のスタイル変更")
 
     def delete_selected_items(self):
@@ -1187,6 +1221,14 @@ class MainWindow(QMainWindow):
                     mx, my = pos.x() + item.text_item.boundingRect().width()/2, -(pos.y() + item.text_item.boundingRect().height()/2)
                     ls = item.raw_text.split('\n'); sy = my + (len(ls)-1)*6
                     for i, l in enumerate(ls): msp.add_text(l, dxfattribs={'height': 10}).set_placement((mx, sy-i*12), align=ezdxf.enums.TextEntityAlignment.MIDDLE_CENTER)
+                if item.arrow == "end" and hasattr(item, 'arrow_p1') and hasattr(item, 'arrow_p2'):
+                    angle = math.atan2(item.arrow_p2.y() - item.arrow_p1.y(), item.arrow_p2.x() - item.arrow_p1.x())
+                    arrow_size = 12 + item.line_width * 1.5
+                    
+                    arrow_p1 = item.arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size, math.sin(angle + math.pi / 6) * arrow_size)
+                    arrow_p2 = item.arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size, math.sin(angle - math.pi / 6) * arrow_size)
+                    
+                    msp.add_lwpolyline([(item.arrow_p2.x(), -item.arrow_p2.y()), (arrow_p1.x(), -arrow_p1.y()), (arrow_p2.x(), -arrow_p2.y())], close=True)
         doc.saveas(path)
 
     def copy_to_jwcad(self):
@@ -1219,6 +1261,15 @@ class MainWindow(QMainWindow):
                     mx, my = pos.x() + item.text_item.boundingRect().width()/2, -(pos.y() + item.text_item.boundingRect().height()/2)
                     ls = item.raw_text.split('\n'); sy = my + (len(ls)-1)*6
                     for i, l in enumerate(ls): wc = sum(2 if unicodedata.east_asian_width(c) in 'FWA' else 1 for c in l); td.append(f'ch {mx-wc*2.5} {sy-i*12-5.0} 10 0 "{l}')
+                if item.arrow == "end" and hasattr(item, 'arrow_p1') and hasattr(item, 'arrow_p2'):
+                    angle = math.atan2(item.arrow_p2.y() - item.arrow_p1.y(), item.arrow_p2.x() - item.arrow_p1.x())
+                    arrow_size = 12 + item.line_width * 1.5
+                    
+                    arrow_p1 = item.arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size, math.sin(angle + math.pi / 6) * arrow_size)
+                    arrow_p2 = item.arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size, math.sin(angle - math.pi / 6) * arrow_size)
+                    td.append(f"{item.arrow_p2.x()} {-item.arrow_p2.y()} {arrow_p1.x()} {-arrow_p1.y()}")
+                    td.append(f"{arrow_p1.x()} {-arrow_p1.y()} {arrow_p2.x()} {-arrow_p2.y()}")
+                    td.append(f"{arrow_p2.x()} {-arrow_p2.y()} {item.arrow_p2.x()} {-item.arrow_p2.y()}")
         QApplication.clipboard().setText('\r\n'.join(td) + '\r\n')
         QMessageBox.information(self, "完了", "Jw_cad用のデータをクリップボードにコピーしました。\nJw_cadを開いて「編集」→「貼り付け (Ctrl+V)」を実行してください。")
 
