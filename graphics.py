@@ -1,10 +1,12 @@
 import uuid
 import math
+import base64
 from PyQt6.QtWidgets import (QGraphicsScene, QGraphicsView, QGraphicsPathItem, 
-                             QGraphicsTextItem, QGraphicsItem, QGraphicsEllipseItem, QInputDialog, QStyle)
-from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF
+                             QGraphicsTextItem, QGraphicsItem, QGraphicsEllipseItem, 
+                             QInputDialog, QStyle, QGraphicsPixmapItem)
+from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QByteArray, QBuffer, QIODevice
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QPainterPath, 
-                         QPainterPathStroker, QTransform, QUndoCommand, QCursor, QPolygonF)
+                         QPainterPathStroker, QTransform, QUndoCommand, QCursor, QPolygonF, QPixmap, QImage)
 
 GRID_SIZE = 20
 
@@ -48,6 +50,36 @@ class FlowchartView(QGraphicsView):
         if hasattr(self.scene(), 'hide_preview_node'):
             self.scene().hide_preview_node()
         super().leaveEvent(event)
+
+
+class ImageFrameItem(QGraphicsPixmapItem):
+    """画像やDXF、標準図枠などの背景用アイテム。JSONへのシリアライズ用にBase64を保持する"""
+    def __init__(self, x, y, base64_data=None, pixmap=None, frame_id=None):
+        super().__init__()
+        self.frame_id = frame_id if frame_id else str(uuid.uuid4())
+        self.base64_data = base64_data
+        
+        if pixmap:
+            self.setPixmap(pixmap)
+            ba = QByteArray()
+            buffer = QBuffer(ba)
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            pixmap.save(buffer, "PNG")
+            self.base64_data = ba.toBase64().data().decode("utf-8")
+        elif base64_data:
+            ba = QByteArray.fromBase64(base64_data.encode("utf-8"))
+            pm = QPixmap()
+            pm.loadFromData(ba, "PNG")
+            self.setPixmap(pm)
+            
+        self.setPos(x, y)
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        self.setZValue(-1000) # 通常の要素や線よりも完全に背面に配置
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
+            return QPointF(round(value.x()/GRID_SIZE)*GRID_SIZE, round(value.y()/GRID_SIZE)*GRID_SIZE)
+        return super().itemChange(change, value)
 
 
 class NodeItem(QGraphicsPathItem):
@@ -180,6 +212,18 @@ class EdgeTextItem(QGraphicsTextItem):
             painter.setPen(QPen(QColor("#3B82F6"), 1, Qt.PenStyle.DashLine)); painter.setBrush(Qt.BrushStyle.NoBrush); painter.drawRect(self.boundingRect())
 
 
+def clip_line_to_node(p_start: QPointF, p_end: QPointF, node: NodeItem) -> QPointF:
+    line = QLineF(p_start, p_end); polygon = node.mapToScene(node.path().toFillPolygon())
+    best_p, min_dist = p_start, float('inf')
+    for i in range(polygon.count()):
+        p_a, p_b = polygon.at(i), polygon.at((i + 1) % polygon.count())
+        intersect_type, ip = line.intersects(QLineF(p_a, p_b))
+        if intersect_type == QLineF.IntersectionType.BoundedIntersection:
+            dist = QLineF(p_start, ip).length()
+            if dist < min_dist: min_dist = dist; best_p = ip
+    return best_p
+
+
 class EdgeItem(QGraphicsPathItem):
     def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight", arrow="none"):
         super().__init__()
@@ -244,7 +288,6 @@ class EdgeItem(QGraphicsPathItem):
         
         pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
         path = QPainterPath()
-        
         p_before_end = pts[0]
         
         if self.routing == "orthogonal" and not self.waypoints:
@@ -257,11 +300,9 @@ class EdgeItem(QGraphicsPathItem):
                     mid_y = (pts[i-1].y() + pts[i].y()) / 2
                     path.lineTo(pts[i-1].x(), mid_y)
                     path.lineTo(pts[i].x(), mid_y)
-                    if i == len(pts) - 1:
-                        p_before_end = QPointF(pts[i].x(), mid_y)
+                    if i == len(pts) - 1: p_before_end = QPointF(pts[i].x(), mid_y)
                 else:
-                    if i == len(pts) - 1:
-                        p_before_end = pts[i-1]
+                    if i == len(pts) - 1: p_before_end = pts[i-1]
                 path.lineTo(pts[i])
 
         self.setPath(path)
@@ -280,11 +321,8 @@ class EdgeItem(QGraphicsPathItem):
         if self.arrow == "end" and hasattr(self, 'arrow_p1') and hasattr(self, 'arrow_p2'):
             angle = math.atan2(self.arrow_p2.y() - self.arrow_p1.y(), self.arrow_p2.x() - self.arrow_p1.x())
             arrow_size = 12 + self.line_width * 1.5
-            
-            arrow_p1 = self.arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size,
-                                               math.sin(angle + math.pi / 6) * arrow_size)
-            arrow_p2 = self.arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size,
-                                               math.sin(angle - math.pi / 6) * arrow_size)
+            arrow_p1 = self.arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size, math.sin(angle + math.pi / 6) * arrow_size)
+            arrow_p2 = self.arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size, math.sin(angle - math.pi / 6) * arrow_size)
             
             painter.setBrush(QBrush(QColor("#3B82F6") if self.isSelected() else self.default_pen.color()))
             painter.setPen(Qt.PenStyle.NoPen)
@@ -510,15 +548,3 @@ class FlowchartScene(QGraphicsScene):
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace): self.main_window.delete_selected_items()
         super().keyPressEvent(event)
-
-
-def clip_line_to_node(p_start: QPointF, p_end: QPointF, node: NodeItem) -> QPointF:
-    line = QLineF(p_start, p_end); polygon = node.mapToScene(node.path().toFillPolygon())
-    best_p, min_dist = p_start, float('inf')
-    for i in range(polygon.count()):
-        p_a, p_b = polygon.at(i), polygon.at((i + 1) % polygon.count())
-        intersect_type, ip = line.intersects(QLineF(p_a, p_b))
-        if intersect_type == QLineF.IntersectionType.BoundedIntersection:
-            dist = QLineF(p_start, ip).length()
-            if dist < min_dist: min_dist = dist; best_p = ip
-    return best_p
