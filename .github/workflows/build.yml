@@ -35,8 +35,10 @@ jobs:
         --noconsole 
         --clean 
         --name "FlowchartCreationMiya-v1.2.0" 
-        --add-data "README.md;."
+        --add-data "README.MD;."
         --collect-all PyQt6
+        --collect-all qtawesome
+        --collect-all pyqtdarktheme
         app.py
 
     # 完成したexeファイルをGitHub上にアップロード
