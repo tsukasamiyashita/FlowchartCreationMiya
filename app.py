@@ -7,7 +7,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QFileDialog, QMessageBox, QGraphicsItemGroup,
                              QColorDialog, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, 
-                             QRadioButton, QComboBox, QDoubleSpinBox, QPushButton, QGraphicsItem)
+                             QRadioButton, QComboBox, QDoubleSpinBox, QPushButton, QGraphicsItem, QGraphicsView)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QMarginsF
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QTransform, QAction, QActionGroup,
                          QPageSize, QPageLayout, QUndoStack, QCursor, QPixmap, QPolygonF)
