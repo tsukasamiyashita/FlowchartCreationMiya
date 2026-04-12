@@ -500,8 +500,26 @@ class FlowchartScene(QGraphicsScene):
         self.main_window.is_moving = False
         tool = self.main_window.current_tool
         
+        # 選択ツールの場合の挙動改善: Ctrl/Shiftなしクリックで単一選択を強制
+        if tool == "select" and event.button() == Qt.MouseButton.LeftButton:
+            if not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
+                item = self.itemAt(event.scenePos(), QTransform())
+                if item:
+                    # 親アイテムがある場合は最上位（NodeItemやEdgeItem）を取得
+                    base_item = item
+                    while base_item.parentItem(): 
+                        base_item = base_item.parentItem()
+                    
+                    # ユーザー要望に従い、クリックしたアイテムのみを確実に単一選択にする
+                    self.clearSelection()
+                    base_item.setSelected(True)
+                else:
+                    # 何もない場所をクリックした場合は全解除
+                    self.clearSelection()
+        
         if tool in ["process", "decision", "data", "terminal"] and event.button() == Qt.MouseButton.LeftButton:
             sx, sy = round(event.scenePos().x()/GRID_SIZE)*GRID_SIZE, round(event.scenePos().y()/GRID_SIZE)*GRID_SIZE
+            self.clearSelection()
             node = NodeItem(sx, sy, text="Node", node_type=tool)
             self.items_ref.append(node); self.addItem(node); self.main_window.push_undo_state(f"ノード追加 ({tool})")
             return
@@ -523,6 +541,7 @@ class FlowchartScene(QGraphicsScene):
                 return
             else:
                 if self.source_node: self.source_node.set_highlight(False); self.source_node = None
+                self.clearSelection()
                 return
 
         if tool == "paste" and event.button() == Qt.MouseButton.LeftButton:

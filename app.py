@@ -410,6 +410,7 @@ class MainWindow(QMainWindow):
     def set_tool(self, tool_name):
         self.current_tool = tool_name
         if self.scene.source_node: self.scene.source_node.set_highlight(False); self.scene.source_node = None
+        self.scene.clearSelection()
         
         if tool_name == "select": 
             self.view.setDragMode(QGraphicsView.DragMode.RubberBandDrag); self.view.setCursor(Qt.CursorShape.ArrowCursor); self.statusBar().showMessage("準備完了")
@@ -777,7 +778,7 @@ class MainWindow(QMainWindow):
             try:
                 if item == getattr(self.scene, 'preview_node', None) or item in getattr(self.scene, 'preview_items', []): is_preview = True
             except RuntimeError: pass
-            if is_preview or isinstance(item, ImageFrameItem): continue
+            if is_preview: continue
             
             if isinstance(item, NodeItem):
                 x, y = item.scenePos().x(), -item.scenePos().y(); t = item.node_type
@@ -821,7 +822,7 @@ class MainWindow(QMainWindow):
             try:
                 if item == getattr(self.scene, 'preview_node', None) or item in getattr(self.scene, 'preview_items', []): is_preview = True
             except RuntimeError: pass
-            if is_preview or isinstance(item, ImageFrameItem): continue
+            if is_preview: continue
             
             if isinstance(item, NodeItem):
                 x, y = item.scenePos().x(), -item.scenePos().y(); t = item.node_type
