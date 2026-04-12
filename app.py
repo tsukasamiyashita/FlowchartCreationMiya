@@ -4,6 +4,7 @@ import json
 import uuid
 import math
 import unicodedata
+import datetime
 import xml.etree.ElementTree as ET
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QFileDialog, QMessageBox, QGraphicsItemGroup,
                              QColorDialog, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, 
@@ -131,6 +132,8 @@ class CustomPrintPreviewDialog(QDialog):
             if isinstance(item, WaypointItem) or is_preview or (sel_only and item.parentItem() is None and not should_keep(item)):
                 item.hide(); hidden_items.append(item)
 
+        old_grid = self.main_window.scene.draw_grid
+        self.main_window.scene.draw_grid = False
         if self.radio_auto.isChecked(): self.main_window.scene.render(painter, QRectF(page_rect), rect, Qt.AspectRatioMode.KeepAspectRatio)
         else:
             sc = (self.spin_scale.value() / 100.0) * (printer.resolution() / self.main_window.logicalDpiX())
@@ -138,6 +141,7 @@ class CustomPrintPreviewDialog(QDialog):
             tx, ty = page_rect.left() + max(0, (page_rect.width()-sw)/2.0), page_rect.top() + max(0, (page_rect.height()-sh)/2.0)
             self.main_window.scene.render(painter, QRectF(tx, ty, sw, sh), rect, Qt.AspectRatioMode.KeepAspectRatio)
         
+        self.main_window.scene.draw_grid = old_grid
         for item in hidden_items: item.show()
         painter.end()
         for item in sel_items: item.setSelected(True)
@@ -220,6 +224,10 @@ class MainWindow(QMainWindow):
     def toggle_theme(self):
         self.is_light_theme = not self.is_light_theme
         self.apply_theme()
+
+    def toggle_grid(self):
+        self.scene.draw_grid = not self.scene.draw_grid
+        self.scene.update()
 
     def get_scene_json(self, selected_only=False):
         data = {"nodes": [], "edges": [], "groups": []}
@@ -348,6 +356,8 @@ class MainWindow(QMainWindow):
         view_menu = menubar.addMenu("表示(&V)")
         act_theme = self.create_icon_action('fa5s.adjust', "テーマ切り替え (Light/Dark)", self.toggle_theme)
         view_menu.addAction(act_theme)
+        self.act_grid = self.create_icon_action('fa5s.th', "グリッド表示/非表示", self.toggle_grid, checkable=True)
+        self.act_grid.setChecked(True); view_menu.addAction(self.act_grid)
         
         help_menu = menubar.addMenu("ヘルプ(&H)")
         help_menu.addAction("使い方(&U)", self.show_usage); help_menu.addAction("バージョン情報(&A)", self.show_about)
@@ -382,6 +392,8 @@ class MainWindow(QMainWindow):
         tb_main.addSeparator()
         act_conn = self.create_icon_action('fa5s.link', "接続", lambda: self.set_tool("connect"), checkable=True)
         tb_main.addAction(act_conn); self.action_group.addAction(act_conn)
+        tb_main.addSeparator()
+        tb_main.addAction(self.act_grid)
 
         tb_edit = QToolBar("編集"); self.addToolBar(tb_edit)
         tb_edit.addAction(self.act_undo)
@@ -482,7 +494,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "エラー", f"自動レイアウトに失敗しました。\n{e}")
 
     def generate_excel(self):
-        path, _ = QFileDialog.getSaveFileName(self, "仕様書(Excel)生成", "", "Excel Files (*.xlsx)")
+        default_name = datetime.datetime.now().strftime("%Y%m%d")
+        path, _ = QFileDialog.getSaveFileName(self, "仕様書(Excel)生成", f"{default_name}.xlsx", "Excel Files (*.xlsx)")
         if not path: return
         
         data = self.get_scene_json()
@@ -554,7 +567,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "エラー", f"読み込みに失敗しました:\n{e}")
 
     def export_drawio(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Draw.io エクスポート", "", "XML Files (*.xml)")
+        default_name = datetime.datetime.now().strftime("%Y%m%d")
+        path, _ = QFileDialog.getSaveFileName(self, "Draw.io エクスポート", f"{default_name}.xml", "XML Files (*.xml)")
         if not path: return
         data = self.get_scene_json()
         
@@ -701,7 +715,8 @@ class MainWindow(QMainWindow):
         else: self.save_file_as()
 
     def save_file_as(self):
-        path, _ = QFileDialog.getSaveFileName(self, "名前を付けて保存", "", "JSON Files (*.json)")
+        default_name = datetime.datetime.now().strftime("%Y%m%d")
+        path, _ = QFileDialog.getSaveFileName(self, "名前を付けて保存", f"{default_name}.json", "JSON Files (*.json)")
         if path: self.current_filepath = path; self.save_file(); self.update_window_title()
 
     def load_json(self):
@@ -711,8 +726,9 @@ class MainWindow(QMainWindow):
             self.load_scene_json(data); self.undo_stack.clear(); self.last_state = self.get_scene_json(); self.current_filepath = path; self.update_window_title()
 
     def export_file(self, initial_filter=None):
+        default_name = datetime.datetime.now().strftime("%Y%m%d")
         all_filters = "DXF Files (*.dxf);;PDF Files (*.pdf);;JPEG Files (*.jpeg *.jpg);;PNG Files (*.png);;SVG Files (*.svg);;Mermaid Markdown (*.md)"
-        path, chosen_filter = QFileDialog.getSaveFileName(self, "エクスポート", "", all_filters, initialFilter=initial_filter if initial_filter else "")
+        path, chosen_filter = QFileDialog.getSaveFileName(self, "エクスポート", default_name, all_filters, initialFilter=initial_filter if initial_filter else "")
         if not path: return
         self.scene.clearSelection(); rect = self.scene.itemsBoundingRect().adjusted(-20, -20, 20, 20)
         hidden = []
@@ -721,6 +737,8 @@ class MainWindow(QMainWindow):
                 if (isinstance(i, WaypointItem) or i == getattr(self.scene, 'preview_node', None) or i in getattr(self.scene, 'preview_items', [])) and i.isVisible():
                     i.hide(); hidden.append(i)
             except RuntimeError: pass
+        old_grid = self.scene.draw_grid
+        self.scene.draw_grid = False
         if not rect.isEmpty():
             if path.endswith(('.png', '.jpg', '.jpeg')):
                 img = QImage(rect.size().toSize(), QImage.Format.Format_ARGB32); img.fill(Qt.GlobalColor.white)
@@ -739,6 +757,7 @@ class MainWindow(QMainWindow):
                 p.end()
             elif path.endswith('.dxf'): self._export_dxf(path)
             elif path.endswith('.md'): self._export_mermaid(path)
+        self.scene.draw_grid = old_grid
         for i in hidden: i.show()
         QMessageBox.information(self, "完了", f"エクスポート完了:\n{path}")
 

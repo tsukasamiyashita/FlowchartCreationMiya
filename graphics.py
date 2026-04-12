@@ -400,6 +400,7 @@ class FlowchartScene(QGraphicsScene):
         self.items_ref = [] 
         self.preview_node = None
         self.preview_items = []
+        self.draw_grid = True
 
     def hide_preview_node(self):
         try:
@@ -490,6 +491,7 @@ class FlowchartScene(QGraphicsScene):
 
     def drawBackground(self, painter, rect):
         super().drawBackground(painter, rect)
+        if not self.draw_grid: return
         painter.setPen(QPen(QColor(200, 200, 200) if self.main_window.is_light_theme else QColor(60, 60, 60), 1, Qt.PenStyle.SolidLine))
         left, top = int(rect.left()) - (int(rect.left()) % GRID_SIZE), int(rect.top()) - (int(rect.top()) % GRID_SIZE)
         lines = [QLineF(x, rect.top(), x, rect.bottom()) for x in range(left, int(rect.right()), GRID_SIZE)]
