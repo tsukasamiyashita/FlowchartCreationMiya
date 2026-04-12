@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QFileDialog, QMessageBox, QGraphicsItemGroup,
                              QColorDialog, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, 
                              QRadioButton, QComboBox, QDoubleSpinBox, QPushButton, QGraphicsItem, QGraphicsView, 
-                             QProxyStyle, QStyle)
+                             QProxyStyle, QStyle, QDockWidget)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QMarginsF
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QTransform, QAction, QActionGroup,
                          QPageSize, QPageLayout, QUndoStack, QCursor, QPixmap, QPolygonF)
@@ -163,8 +163,8 @@ class MainWindow(QMainWindow):
         self.scene.setSceneRect(-2000, -2000, 4000, 4000)
 
         self.view = FlowchartView(self.scene)
-        self.view.centerOn(0, 0)
         self.setCentralWidget(self.view)
+        self.init_legend()
 
         self.icon_actions = [] 
         self.init_menu()
@@ -375,6 +375,41 @@ class MainWindow(QMainWindow):
 
     def show_about(self): 
         QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.3.0\nPython & PyQt6 製フローチャート作成ツール")
+
+    def init_legend(self):
+        dock = QDockWidget("ノード解説", self)
+        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        items = [
+            ('fa5s.square', "処理 (Process)", "一般的な処理や工程、計算に使います。長方形で表します。"),
+            ('fa5s.code-branch', "分岐 (Decision)", "条件によってYes/Noなどが分かれる判断に使います。菱形で表します。"),
+            ('fa5s.layer-group', "データ (Data)", "データの入出力や情報の流れを示します。平行四辺形で表します。"),
+            ('fa5s.capsules', "端子 (Terminal)", "フローの開始（スタート）や終了（エンド）を示します。角丸またはカプセル型で表します。")
+        ]
+        
+        ic_color = 'gray' if self.is_light_theme else 'white'
+        for icon, title, desc in items:
+            row = QHBoxLayout()
+            label_icon = QLabel()
+            label_icon.setPixmap(qta.icon(icon, color=ic_color).pixmap(24, 24))
+            row.addWidget(label_icon, 0, Qt.AlignmentFlag.AlignTop)
+            
+            txt_layout = QVBoxLayout()
+            label_title = QLabel(f"<b>{title}</b>")
+            label_desc = QLabel(desc)
+            label_desc.setWordWrap(True)
+            label_desc.setStyleSheet("font-size: 11px; color: gray;")
+            txt_layout.addWidget(label_title)
+            txt_layout.addWidget(label_desc)
+            row.addLayout(txt_layout)
+            layout.addLayout(row)
+            layout.addSpacing(15)
+        
+        layout.addStretch()
+        dock.setWidget(widget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
     def init_toolbars(self):
         tb_main = QToolBar("メインツール"); self.addToolBar(tb_main)
