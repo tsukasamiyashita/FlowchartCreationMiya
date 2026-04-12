@@ -52,57 +52,21 @@ class FlowchartView(QGraphicsView):
         super().leaveEvent(event)
 
 
-class ImageFrameItem(QGraphicsPixmapItem):
-    """画像やDXF、標準図枠などの背景用アイテム。JSONへのシリアライズ用にBase64を保持する"""
-    def __init__(self, x, y, base64_data=None, pixmap=None, frame_id=None):
-        super().__init__()
-        self.frame_id = frame_id if frame_id else str(uuid.uuid4())
-        self.base64_data = base64_data
-        
-        if pixmap:
-            self.setPixmap(pixmap)
-            ba = QByteArray()
-            buffer = QBuffer(ba)
-            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-            pixmap.save(buffer, "PNG")
-            self.base64_data = ba.toBase64().data().decode("utf-8")
-        elif base64_data:
-            ba = QByteArray.fromBase64(base64_data.encode("utf-8"))
-            pm = QPixmap()
-            pm.loadFromData(ba, "PNG")
-            self.setPixmap(pm)
-            
-        self.setPos(x, y)
-        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
-        self.setZValue(-1000) # 通常の要素や線よりも完全に背面に配置
-
-    def itemChange(self, change, value):
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene():
-            return QPointF(round(value.x()/GRID_SIZE)*GRID_SIZE, round(value.y()/GRID_SIZE)*GRID_SIZE)
-        return super().itemChange(change, value)
 
 
 class NodeItem(QGraphicsPathItem):
-    def __init__(self, x, y, text="Node", node_type="process", node_id=None, bg_color="#E1F5FE", text_color="#000000"):
+    def __init__(self, x, y, text="Node", node_type="process", node_id=None, bg_color="#E1F5FE", text_color="#000000", w=100, h=50):
         super().__init__()
         self.node_type = node_type
         self.node_id = node_id if node_id else str(uuid.uuid4())
         self.edges = []
         self.bg_color = QColor(bg_color)
         self.text_color = QColor(text_color)
+        self.w = w
+        self.h = h
         self.default_pen = QPen(Qt.GlobalColor.black, 2)
         self._is_highlighted = False
-        self.orig_x = x
-        self.orig_y = y
-
-        path = QPainterPath()
-        if self.node_type == "process": path.addRect(QRectF(-50, -25, 100, 50))
-        elif self.node_type == "decision": path.moveTo(0,-35); path.lineTo(60,0); path.lineTo(0,35); path.lineTo(-60,0); path.closeSubpath()
-        elif self.node_type == "data": path.moveTo(-35,-25); path.lineTo(65,-25); path.lineTo(35,25); path.lineTo(-65,25); path.closeSubpath()
-        elif self.node_type == "terminal": path.addRoundedRect(QRectF(-50, -25, 100, 50), 25, 25)
-        else: path.addRect(QRectF(-50, -25, 100, 50))
-
-        self.setPath(path)
+        
         self.setPos(x, y)
         self.setBrush(QBrush(self.bg_color))
         self.setPen(self.default_pen)
@@ -111,7 +75,32 @@ class NodeItem(QGraphicsPathItem):
         self.text_item = QGraphicsTextItem(text)
         self.text_item.setParentItem(self)
         self.text_item.setDefaultTextColor(self.text_color)
+        
+        self.update_path()
         self.set_text(text)
+
+    def update_path(self):
+        path = QPainterPath()
+        hw, hh = self.w / 2, self.h / 2
+        if self.node_type == "process":
+            path.addRect(QRectF(-hw, -hh, self.w, self.h))
+        elif self.node_type == "decision":
+            path.moveTo(0, -hh-10); path.lineTo(hw+10, 0); path.lineTo(0, hh+10); path.lineTo(-hw-10, 0); path.closeSubpath()
+        elif self.node_type == "data":
+            skew = hh
+            path.moveTo(-hw+skew/2, -hh); path.lineTo(hw+skew/2, -hh); path.lineTo(hw-skew/2, hh); path.lineTo(-hw-skew/2, hh); path.closeSubpath()
+        elif self.node_type == "terminal":
+            path.addRoundedRect(QRectF(-hw, -hh, self.w, self.h), hh, hh)
+        else:
+            path.addRect(QRectF(-hw, -hh, self.w, self.h))
+        self.setPath(path)
+        self._update_text_pos()
+        for edge in self.edges: edge.update_position()
+
+    def set_size(self, w, h):
+        if self.w != w or self.h != h:
+            self.w, self.h = w, h
+            self.update_path()
 
     def _update_text_pos(self):
         r = self.boundingRect(); tr = self.text_item.boundingRect()
@@ -225,7 +214,7 @@ def clip_line_to_node(p_start: QPointF, p_end: QPointF, node: NodeItem) -> QPoin
 
 
 class EdgeItem(QGraphicsPathItem):
-    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight", arrow="none"):
+    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight", arrow="end"):
         super().__init__()
         self.source_node = source_node
         self.target_node = target_node
@@ -307,6 +296,16 @@ class EdgeItem(QGraphicsPathItem):
 
         self.setPath(path)
         
+        # 始点側の矢印用ポイント
+        p_after_start = pts[1]
+        if self.routing == "orthogonal":
+            mid_y_start = (pts[0].y() + pts[1].y()) / 2
+            p_after_start = QPointF(pts[0].x(), mid_y_start)
+        
+        self.start_arrow_p1 = p_after_start
+        self.start_arrow_p2 = clip_line_to_node(p_after_start, pts[0], self.source_node)
+
+        # 終点側の矢印用ポイント (既存のロジックと同じ位置に配置)
         self.arrow_p1 = p_before_end
         self.arrow_p2 = clip_line_to_node(p_before_end, pts[-1], self.target_node)
         
@@ -318,7 +317,7 @@ class EdgeItem(QGraphicsPathItem):
         painter.setPen(QPen(QColor("#3B82F6"), max(3, self.line_width)) if self.isSelected() else self.default_pen)
         painter.drawPath(self.path())
         
-        if self.arrow == "end" and hasattr(self, 'arrow_p1') and hasattr(self, 'arrow_p2'):
+        if self.arrow in ["end", "both"] and hasattr(self, 'arrow_p1') and hasattr(self, 'arrow_p2'):
             angle = math.atan2(self.arrow_p2.y() - self.arrow_p1.y(), self.arrow_p2.x() - self.arrow_p1.x())
             arrow_size = 12 + self.line_width * 1.5
             arrow_p1 = self.arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size, math.sin(angle + math.pi / 6) * arrow_size)
@@ -327,6 +326,16 @@ class EdgeItem(QGraphicsPathItem):
             painter.setBrush(QBrush(QColor("#3B82F6") if self.isSelected() else self.default_pen.color()))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPolygon(QPolygonF([self.arrow_p2, arrow_p1, arrow_p2]))
+
+        if self.arrow in ["start", "both"] and hasattr(self, 'start_arrow_p1') and hasattr(self, 'start_arrow_p2'):
+            angle = math.atan2(self.start_arrow_p2.y() - self.start_arrow_p1.y(), self.start_arrow_p2.x() - self.start_arrow_p1.x())
+            arrow_size = 12 + self.line_width * 1.5
+            arrow_p1 = self.start_arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size, math.sin(angle + math.pi / 6) * arrow_size)
+            arrow_p2 = self.start_arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size, math.sin(angle - math.pi / 6) * arrow_size)
+            
+            painter.setBrush(QBrush(QColor("#3B82F6") if self.isSelected() else self.default_pen.color()))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPolygon(QPolygonF([self.start_arrow_p2, arrow_p1, arrow_p2]))
             
         if self.isSelected():
             painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QBrush(QColor("#3B82F6")))
@@ -451,7 +460,7 @@ class FlowchartScene(QGraphicsScene):
                     for e in self.main_window.clipboard_data.get("edges", []):
                         src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
                         if src and tgt:
-                            edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "none"))
+                            edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "end"))
                             edge.setOpacity(0.5); edge.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                             edge.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False); edge.setZValue(1000)
                             if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])

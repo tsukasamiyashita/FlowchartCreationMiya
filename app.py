@@ -7,7 +7,8 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QFileDialog, QMessageBox, QGraphicsItemGroup,
                              QColorDialog, QLabel, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, 
-                             QRadioButton, QComboBox, QDoubleSpinBox, QPushButton, QGraphicsItem, QGraphicsView)
+                             QRadioButton, QComboBox, QDoubleSpinBox, QPushButton, QGraphicsItem, QGraphicsView, 
+                             QProxyStyle, QStyle)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QMarginsF
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QTransform, QAction, QActionGroup,
                          QPageSize, QPageLayout, QUndoStack, QCursor, QPixmap, QPolygonF)
@@ -21,9 +22,15 @@ import openpyxl
 import ezdxf
 
 # 同一ディレクトリにある graphics.py から描画コンポーネントをインポート
-from graphics import (GRID_SIZE, SceneStateCommand, FlowchartView, ImageFrameItem, 
+from graphics import (GRID_SIZE, SceneStateCommand, FlowchartView, 
                       NodeItem, WaypointItem, EdgeTextItem, EdgeItem, 
                       FlowchartScene, clip_line_to_node)
+                      
+class ToolTipDelayStyle(QProxyStyle):
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
+            return 200 # 200ms = 0.2秒
+        return super().styleHint(hint, option, widget, returnData)
 
 class CustomPrintPreviewDialog(QDialog):
     def __init__(self, main_window, has_selection=False):
@@ -160,6 +167,9 @@ class MainWindow(QMainWindow):
         self.init_toolbars()
         self.apply_theme() 
         
+        self.scene.selectionChanged.connect(self.on_selection_changed)
+        self.on_selection_changed() # 初期状態の反映
+        
         self.update_window_title()
         self.statusBar().showMessage("準備完了: 範囲選択や複数選択（Ctrlキー+クリック）が可能です")
 
@@ -180,6 +190,9 @@ class MainWindow(QMainWindow):
                     qdarktheme.setup_theme(theme)
                 else:
                     app.setStyleSheet(qdarktheme.load_stylesheet(theme))
+                
+                # ツールチップの表示遅延（0.2秒）を適用
+                app.setStyle(ToolTipDelayStyle(app.style()))
             except Exception as e:
                 print(f"Theme setup failed: {e}")
         
@@ -224,7 +237,7 @@ class MainWindow(QMainWindow):
         
         for item in items:
             if isinstance(item, NodeItem) and getattr(self.scene, 'preview_node', None) != item and item not in getattr(self.scene, 'preview_items', []):
-                data["nodes"].append({"id": item.node_id, "type": item.node_type, "x": item.scenePos().x(), "y": item.scenePos().y(), "text": item.text_item.toPlainText(), "bg_color": item.bg_color.name(), "text_color": item.text_color.name()})
+                data["nodes"].append({"id": item.node_id, "type": item.node_type, "x": item.scenePos().x(), "y": item.scenePos().y(), "w": item.w, "h": item.h, "text": item.text_item.toPlainText(), "bg_color": item.bg_color.name(), "text_color": item.text_color.name()})
                 valid_node_ids.add(item.node_id)
                 
         for item in items:
@@ -238,13 +251,6 @@ class MainWindow(QMainWindow):
                 c_ids = [c.node_id for c in item.childItems() if hasattr(c, 'node_id')]
                 if c_ids: data["groups"].append(c_ids)
                 
-        for item in items:
-            if isinstance(item, ImageFrameItem):
-                if selected_only and not item.isSelected(): continue
-                data.setdefault("frames", []).append({
-                    "id": item.frame_id, "x": item.scenePos().x(), "y": item.scenePos().y(), 
-                    "base64": item.base64_data, "scale": item.scale()
-                })
         return data
 
     def load_scene_json(self, data, offset_x=0, offset_y=0, clear_scene=True, generate_new_ids=False, is_undo_redo=False):
@@ -253,22 +259,17 @@ class MainWindow(QMainWindow):
             self.scene.preview_node = None; self.scene.preview_items = []; self.scene.source_node = None
             
         id_map = {}
-        for f in data.get("frames", []):
-            item = ImageFrameItem(f["x"]+offset_x, f["y"]+offset_y, base64_data=f.get("base64"), frame_id=f.get("id", str(uuid.uuid4())) if not generate_new_ids else str(uuid.uuid4()))
-            item.setScale(f.get("scale", 1.0))
-            self.scene.items_ref.append(item); self.scene.addItem(item)
-            if not clear_scene: item.setSelected(True)
 
         for n in data.get("nodes", []):
             new_id = str(uuid.uuid4()) if generate_new_ids else n.get("id", str(uuid.uuid4()))
-            node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"))
+            node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"), w=n.get("w", 100), h=n.get("h", 50))
             self.scene.items_ref.append(node); self.scene.addItem(node); id_map[n.get("id")] = node
             if not clear_scene: node.setSelected(True)
             
         for e in data.get("edges", []):
             src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
             if src and tgt:
-                edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "none"))
+                edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "end"))
                 if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
                 for w in e.get("waypoints", []):
                     wp = WaypointItem(w["x"]+offset_x, w["y"]+offset_y, edge); edge.waypoints.append(wp); self.scene.items_ref.append(wp); self.scene.addItem(wp)
@@ -301,11 +302,6 @@ class MainWindow(QMainWindow):
             act = QAction(text, self); act.setShortcut(sc); act.triggered.connect(func); file_menu.addAction(act)
         file_menu.addSeparator()
         
-        frame_menu = file_menu.addMenu("図枠の作成・読込")
-        frame_menu.addAction("標準図枠(A4横)を作成", lambda: self.create_standard_frame("A4"))
-        frame_menu.addAction("標準図枠(A3横)を作成", lambda: self.create_standard_frame("A3"))
-        frame_menu.addAction("図枠/画像/DXFをインポート...", self.import_frame_file)
-        
         file_menu.addSeparator()
         act_excel = self.create_icon_action('fa5s.file-excel', "仕様書(Excel)生成...", self.generate_excel)
         file_menu.addAction(act_excel)
@@ -313,7 +309,12 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Draw.ioインポート(.xml)...", self.import_drawio)
         file_menu.addAction("Draw.ioエクスポート(.xml)...", self.export_drawio)
         file_menu.addSeparator()
-        file_menu.addAction("各種エクスポート(画像/PDF/CAD/Mermaid)(&E)...", self.export_file); file_menu.addAction("Jw_cadへコピー(&C)", self.copy_to_jwcad)
+        file_menu.addSeparator()
+        file_menu.addAction("DXFエクスポート...", lambda: self.export_file("DXF Files (*.dxf)"))
+        file_menu.addAction("PDFエクスポート...", lambda: self.export_file("PDF Files (*.pdf)"))
+        file_menu.addAction("JPEGエクスポート...", lambda: self.export_file("JPEG Files (*.jpeg *.jpg)"))
+        file_menu.addAction("その他の形式でエクスポート...", lambda: self.export_file())
+        file_menu.addAction("Jw_cadへコピー(&C)", self.copy_to_jwcad)
         file_menu.addSeparator(); file_menu.addAction("終了(&X)", self.close)
         
         edit_menu = menubar.addMenu("編集(&E)")
@@ -354,7 +355,6 @@ class MainWindow(QMainWindow):
     def show_usage(self):
         msg = ("【操作説明】\n"
                "・図形の追従プレビュー: 追加モード時やコピペ時、カーソルにゴーストが追従します。\n"
-               "・図枠の活用: メニューから標準図枠を配置したり、DXF/画像を背景としてインポート可能です。\n"
                "・Undo/Redo: Ctrl+Z / Ctrl+Y\n"
                "・コピー＆ペースト: Ctrl+Cでコピーし、キャンバスをクリックして配置\n"
                "・グループ化: Ctrl+G / 解除: Ctrl+Shift+G\n"
@@ -402,7 +402,10 @@ class MainWindow(QMainWindow):
         tb_style.addWidget(QLabel("線幅:")); self.cb_width = QComboBox(); self.cb_width.addItems(["1", "2", "3", "4", "5"]); self.cb_width.setCurrentText("2"); self.cb_width.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_width)
         tb_style.addWidget(QLabel("線種:")); self.cb_style = QComboBox(); self.cb_style.addItems(["実線(solid)", "破線(dash)", "点線(dot)"]); self.cb_style.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_style)
         tb_style.addWidget(QLabel("ルート:")); self.cb_routing = QComboBox(); self.cb_routing.addItems(["直線", "直角(Orthogonal)"]); self.cb_routing.setItemData(0, "straight"); self.cb_routing.setItemData(1, "orthogonal"); self.cb_routing.currentIndexChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_routing)
-        tb_style.addWidget(QLabel("終端:")); self.cb_arrow = QComboBox(); self.cb_arrow.addItems(["なし", "矢印"]); self.cb_arrow.setItemData(0, "none"); self.cb_arrow.setItemData(1, "end"); self.cb_arrow.currentIndexChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_arrow)
+        tb_style.addWidget(QLabel("終端:")); self.cb_arrow = QComboBox(); self.cb_arrow.addItems(["なし", "矢印(終端)", "矢印(始端)", "両矢印"]); self.cb_arrow.setItemData(0, "none"); self.cb_arrow.setItemData(1, "end"); self.cb_arrow.setItemData(2, "start"); self.cb_arrow.setItemData(3, "both"); self.cb_arrow.setCurrentIndex(1); self.cb_arrow.currentIndexChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_arrow)
+        tb_style.addSeparator()
+        tb_style.addWidget(QLabel("幅:")); self.sb_node_w = QDoubleSpinBox(); self.sb_node_w.setRange(20, 1000); self.sb_node_w.setSingleStep(20); self.sb_node_w.setValue(100); self.sb_node_w.valueChanged.connect(self.on_node_size_ui_changed); tb_style.addWidget(self.sb_node_w)
+        tb_style.addWidget(QLabel("高さ:")); self.sb_node_h = QDoubleSpinBox(); self.sb_node_h.setRange(20, 1000); self.sb_node_h.setSingleStep(20); self.sb_node_h.setValue(50); self.sb_node_h.valueChanged.connect(self.on_node_size_ui_changed); tb_style.addWidget(self.sb_node_h)
 
     def set_tool(self, tool_name):
         self.current_tool = tool_name
@@ -423,95 +426,34 @@ class MainWindow(QMainWindow):
             g_pos = QCursor.pos(); v_pos = self.view.mapFromGlobal(g_pos)
             if self.view.rect().contains(v_pos): self.scene.update_preview_node(self.view.mapToScene(v_pos), tool_name)
 
-    def create_standard_frame(self, size="A4"):
-        w, h = (1188, 840) if size == "A4" else (1680, 1188)
-        img = QImage(w, h, QImage.Format.Format_ARGB32)
-        img.fill(Qt.GlobalColor.white)
-        p = QPainter(img); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(0, 0, w, h, QColor(255, 255, 255, 240))
-        p.setPen(QPen(Qt.GlobalColor.black, 2)); m = 40
-        p.drawRect(m, m, w - m*2, h - m*2)
-        tb_w, tb_h = 300, 80; tb_x, tb_y = w - m - tb_w, h - m - tb_h
-        p.drawRect(tb_x, tb_y, tb_w, tb_h)
-        p.drawLine(tb_x, tb_y + 40, tb_x + tb_w, tb_y + 40)
-        p.drawLine(tb_x + 150, tb_y + 40, tb_x + 150, tb_y + tb_h)
-        f = p.font(); f.setPixelSize(20); f.setBold(True); p.setFont(f)
-        p.drawText(QRectF(tb_x, tb_y, tb_w, 40), Qt.AlignmentFlag.AlignCenter, "Flowchart Diagram")
-        f.setPixelSize(14); f.setBold(False); p.setFont(f)
-        p.drawText(QRectF(tb_x, tb_y + 40, 150, 40), Qt.AlignmentFlag.AlignCenter, f"Size: {size}")
-        p.drawText(QRectF(tb_x + 150, tb_y + 40, 150, 40), Qt.AlignmentFlag.AlignCenter, "Date: ____/__/__")
-        p.end()
-        item = ImageFrameItem(-w//2, -h//2, pixmap=QPixmap.fromImage(img))
-        self.scene.items_ref.append(item); self.scene.addItem(item)
-        self.push_undo_state(f"標準図枠({size})作成")
+    def on_selection_changed(self):
+        sel = self.scene.selectedItems()
+        nodes = [i for i in sel if isinstance(i, NodeItem)]
+        if nodes:
+            node = nodes[0]
+            self.sb_node_w.blockSignals(True)
+            self.sb_node_h.blockSignals(True)
+            self.sb_node_w.setValue(node.w)
+            self.sb_node_h.setValue(node.h)
+            self.sb_node_w.blockSignals(False)
+            self.sb_node_h.blockSignals(False)
+            self.sb_node_w.setEnabled(True)
+            self.sb_node_h.setEnabled(True)
+        else:
+            self.sb_node_w.setEnabled(False)
+            self.sb_node_h.setEnabled(False)
 
-    def import_frame_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "図枠/画像のインポート", "", "Supported Files (*.dxf *.png *.jpg *.jpeg)")
-        if not path: return
-        if path.endswith(('.png', '.jpg', '.jpeg')):
-            item = ImageFrameItem(0, 0, pixmap=QPixmap(path))
-            self.scene.items_ref.append(item); self.scene.addItem(item)
-            self.push_undo_state("画像インポート")
-        elif path.endswith('.dxf'):
-            self._import_dxf_as_frame(path)
-
-    def _import_dxf_as_frame(self, path):
-        try:
-            doc = ezdxf.readfile(path); msp = doc.modelspace()
-            min_x = min_y = float('inf'); max_x = max_y = float('-inf'); paths = []
-            for e in msp:
-                if e.dxftype() == 'LINE':
-                    x1, y1, x2, y2 = e.dxf.start.x, -e.dxf.start.y, e.dxf.end.x, -e.dxf.end.y
-                    paths.append(('line', (x1, y1, x2, y2)))
-                    min_x = min(min_x, x1, x2); max_x = max(max_x, x1, x2); min_y = min(min_y, y1, y2); max_y = max(max_y, y1, y2)
-                elif e.dxftype() == 'LWPOLYLINE':
-                    pts = [(p[0], -p[1]) for p in e.get_points(format='xy')]
-                    if pts:
-                        paths.append(('polyline', (pts, e.closed)))
-                        for x, y in pts: min_x = min(min_x, x); max_x = max(max_x, x); min_y = min(min_y, y); max_y = max(max_y, y)
-                elif e.dxftype() == 'TEXT':
-                    x, y, txt, h = e.dxf.insert.x, -e.dxf.insert.y, e.dxf.text, e.dxf.height
-                    paths.append(('text', (x, y, txt, h)))
-                    min_x = min(min_x, x); max_x = max(max_x, x); min_y = min(min_y, y); max_y = max(max_y, y)
-            if min_x == float('inf'):
-                QMessageBox.warning(self, "エラー", "有効な図形が見つかりません"); return
-            
-            # DXF図形のサイズ(通常ミリメートル)
-            dxf_w, dxf_h = max_x - min_x, max_y - min_y
-            
-            # 根本的改善: キャンバス上の表示スケール(4.0)と、描画用超高解像度スケール(12.0)を設定
-            # 1mm = 4px の表示サイズになり、ズームしてもぼやけない
-            display_scale = 4.0
-            render_scale = 12.0
-            margin = 5
-            
-            w, h = (dxf_w + margin * 2) * render_scale, (dxf_h + margin * 2) * render_scale
-            img = QImage(int(w), int(h), QImage.Format.Format_ARGB32); img.fill(Qt.GlobalColor.transparent)
-            p = QPainter(img); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.scale(render_scale, render_scale)
-            # スケールに関わらず細く綺麗な線を描画
-            p.setPen(QPen(Qt.GlobalColor.black, max(0.05, 1.0 / render_scale)))
-            
-            ox, oy = -min_x + margin, -min_y + margin
-            for pt, data in paths:
-                if pt == 'line':
-                    x1, y1, x2, y2 = data; p.drawLine(QPointF(x1+ox, y1+oy), QPointF(x2+ox, y2+oy))
-                elif pt == 'polyline':
-                    pts, closed = data; qpts = [QPointF(x+ox, y+oy) for x,y in pts]; p.drawPolyline(QPolygonF(qpts))
-                    if closed and qpts: p.drawLine(qpts[-1], qpts[0])
-                elif pt == 'text':
-                    x, y, txt, f_h = data; f = p.font(); f.setPointSizeF(f_h * 1.5); p.setFont(f)
-                    p.drawText(QPointF(x+ox, y+oy), txt)
-            p.end()
-            
-            item = ImageFrameItem(0, 0, pixmap=QPixmap.fromImage(img))
-            # 見た目の表示サイズを調整
-            item.setScale(display_scale / render_scale)
-            
-            self.scene.items_ref.append(item); self.scene.addItem(item)
-            self.push_undo_state("DXF図枠インポート")
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"DXFのインポートに失敗しました:\n{e}")
+    def on_node_size_ui_changed(self):
+        nodes = [i for i in self.scene.selectedItems() if isinstance(i, NodeItem)]
+        if nodes:
+            w, h = self.sb_node_w.value(), self.sb_node_h.value()
+            changed = False
+            for n in nodes:
+                if n.w != w or n.h != h:
+                    n.set_size(w, h)
+                    changed = True
+            if changed:
+                self.push_undo_state("ノードサイズ変更")
 
     def auto_layout_networkx(self):
         data = self.get_scene_json()
@@ -633,8 +575,11 @@ class MainWindow(QMainWindow):
 
         for i, e in enumerate(data["edges"]):
             style = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" if e.get("routing")=="orthogonal" else "html=1;"
-            if e.get("arrow") == "none": style += "endArrow=none;"
-            else: style += "endArrow=classic;"
+            arr = e.get("arrow", "end")
+            if arr == "none": style += "startArrow=none;endArrow=none;"
+            elif arr == "end": style += "startArrow=none;endArrow=classic;"
+            elif arr == "start": style += "startArrow=classic;endArrow=none;"
+            elif arr == "both": style += "startArrow=classic;endArrow=classic;"
             cell = ET.SubElement(root, 'mxCell', id=f"edge_{i}", value=e.get("label", ""), style=style, edge="1", parent="1", source=e["source"], target=e["target"])
             ET.SubElement(cell, 'mxGeometry', relative="1", **{'as': 'geometry'})
 
@@ -728,9 +673,6 @@ class MainWindow(QMainWindow):
             if isinstance(i, NodeItem): nodes.add(i); edges.update(i.edges)
             elif isinstance(i, EdgeItem): edges.add(i)
             elif isinstance(i, WaypointItem): wps.add(i)
-            elif isinstance(i, ImageFrameItem):
-                if i.scene(): self.scene.removeItem(i)
-                if i in self.scene.items_ref: self.scene.items_ref.remove(i)
         for wp in wps:
             if wp.edge not in edges: wp.edge.remove_waypoint(wp)
         for e in edges:
@@ -767,8 +709,9 @@ class MainWindow(QMainWindow):
             with open(path, 'r', encoding='utf-8') as f: data = json.load(f)
             self.load_scene_json(data); self.undo_stack.clear(); self.last_state = self.get_scene_json(); self.current_filepath = path; self.update_window_title()
 
-    def export_file(self):
-        path, _ = QFileDialog.getSaveFileName(self, "エクスポート", "", "PNG Files (*.png);;JPEG Files (*.jpeg *.jpg);;SVG Files (*.svg);;PDF Files (*.pdf);;DXF Files (*.dxf);;Mermaid Markdown (*.md)")
+    def export_file(self, initial_filter=None):
+        all_filters = "DXF Files (*.dxf);;PDF Files (*.pdf);;JPEG Files (*.jpeg *.jpg);;PNG Files (*.png);;SVG Files (*.svg);;Mermaid Markdown (*.md)"
+        path, chosen_filter = QFileDialog.getSaveFileName(self, "エクスポート", "", all_filters, initialFilter=initial_filter if initial_filter else "")
         if not path: return
         self.scene.clearSelection(); rect = self.scene.itemsBoundingRect().adjusted(-20, -20, 20, 20)
         hidden = []
@@ -813,9 +756,15 @@ class MainWindow(QMainWindow):
             src = e["source"].replace("-", "")
             tgt = e["target"].replace("-", "")
             label = e.get("label", "").replace("\n", "<br>")
-            arrow = "-->" if e.get("arrow", "none") == "end" else "---"
-            style = e.get("style", "solid")
-            if style == "dash" or style == "dot": arrow = "-.->" if e.get("arrow", "none") == "end" else "-.-"
+            arr_type = e.get("arrow", "end")
+            style_type = e.get("style", "solid")
+            is_dotted = style_type in ["dash", "dot"]
+            
+            if arr_type == "both": arrow = "<-.->" if is_dotted else "<->"
+            elif arr_type == "start": arrow = "<-.-" if is_dotted else "<--"
+            elif arr_type == "end": arrow = "-.->" if is_dotted else "-->"
+            else: arrow = "-.-" if is_dotted else "---"
+            
             if label: lines.append(f'    {src} {arrow}|"{label}"| {tgt}')
             else: lines.append(f'    {src} {arrow} {tgt}')
         lines.append("```")
@@ -850,14 +799,19 @@ class MainWindow(QMainWindow):
                     mx, my = pos.x() + item.text_item.boundingRect().width()/2, -(pos.y() + item.text_item.boundingRect().height()/2)
                     ls = item.raw_text.split('\n'); sy = my + (len(ls)-1)*6
                     for i, l in enumerate(ls): msp.add_text(l, dxfattribs={'height': 10}).set_placement((mx, sy-i*12), align=ezdxf.enums.TextEntityAlignment.MIDDLE_CENTER)
-                if item.arrow == "end" and hasattr(item, 'arrow_p1') and hasattr(item, 'arrow_p2'):
+                if item.arrow in ["end", "both"] and hasattr(item, 'arrow_p1') and hasattr(item, 'arrow_p2'):
                     angle = math.atan2(item.arrow_p2.y() - item.arrow_p1.y(), item.arrow_p2.x() - item.arrow_p1.x())
                     arrow_size = 12 + item.line_width * 1.5
-                    
-                    arrow_p1 = item.arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size, math.sin(angle + math.pi / 6) * arrow_size)
-                    arrow_p2 = item.arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size, math.sin(angle - math.pi / 6) * arrow_size)
-                    
-                    msp.add_lwpolyline([(item.arrow_p2.x(), -item.arrow_p2.y()), (arrow_p1.x(), -arrow_p1.y()), (arrow_p2.x(), -arrow_p2.y())], close=True)
+                    ap1 = item.arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size, math.sin(angle + math.pi / 6) * arrow_size)
+                    ap2 = item.arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size, math.sin(angle - math.pi / 6) * arrow_size)
+                    msp.add_lwpolyline([(item.arrow_p2.x(), -item.arrow_p2.y()), (ap1.x(), -ap1.y()), (ap2.x(), -ap2.y())], close=True)
+                
+                if item.arrow in ["start", "both"] and hasattr(item, 'start_arrow_p1') and hasattr(item, 'start_arrow_p2'):
+                    angle = math.atan2(item.start_arrow_p2.y() - item.start_arrow_p1.y(), item.start_arrow_p2.x() - item.start_arrow_p1.x())
+                    arrow_size = 12 + item.line_width * 1.5
+                    ap1 = item.start_arrow_p2 - QPointF(math.cos(angle + math.pi / 6) * arrow_size, math.sin(angle + math.pi / 6) * arrow_size)
+                    ap2 = item.start_arrow_p2 - QPointF(math.cos(angle - math.pi / 6) * arrow_size, math.sin(angle - math.pi / 6) * arrow_size)
+                    msp.add_lwpolyline([(item.start_arrow_p2.x(), -item.start_arrow_p2.y()), (ap1.x(), -ap1.y()), (ap2.x(), -ap2.y())], close=True)
         doc.saveas(path)
 
     def copy_to_jwcad(self):
