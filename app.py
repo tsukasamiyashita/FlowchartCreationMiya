@@ -191,6 +191,10 @@ class MainWindow(QMainWindow):
         return os.path.join(os.path.expanduser("~"), "FlowchartCreationMiya", "settings.json")
 
     def save_settings(self):
+        reply = QMessageBox.question(self, "設定保存の確認", "現在の書式設定（フォントや線のスタイルなど）を、次回起動時の既定値として保存しますか？",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.No: return
+        
         config_path = self.get_config_path()
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
         
@@ -236,6 +240,10 @@ class MainWindow(QMainWindow):
             print(f"Failed to load settings: {e}")
 
     def reset_settings(self):
+        reply = QMessageBox.question(self, "設定リセットの確認", "保存されている既定の設定を削除し、アプリの初期状態に戻しますか？",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.No: return
+
         config_path = self.get_config_path()
         if os.path.exists(config_path):
             try:
@@ -292,6 +300,14 @@ class MainWindow(QMainWindow):
             self.scene.setBackgroundBrush(QBrush(QColor(255, 255, 255)))
         else:
             self.scene.setBackgroundBrush(QBrush(QColor(30, 30, 30)))
+        
+        # 既存のアイテムの色を更新
+        for item in self.scene.items():
+            if hasattr(item, 'update_pen'):
+                item.update_pen()
+            if hasattr(item, 'update_style'):
+                item.update_style()
+                
         self.scene.update()
 
     def toggle_grid(self):
@@ -314,14 +330,14 @@ class MainWindow(QMainWindow):
         
         for item in items:
             if isinstance(item, NodeItem) and getattr(self.scene, 'preview_node', None) != item and item not in getattr(self.scene, 'preview_items', []):
-                data["nodes"].append({"id": item.node_id, "type": item.node_type, "x": item.scenePos().x(), "y": item.scenePos().y(), "w": item.w, "h": item.h, "text": item.text_item.toPlainText(), "bg_color": item.bg_color.name(), "text_color": item.text_color.name(), "font": item.font_family})
+                data["nodes"].append({"id": item.node_id, "type": item.node_type, "x": item.scenePos().x(), "y": item.scenePos().y(), "w": item.w, "h": item.h, "text": item.text_item.toPlainText(), "bg_color": item.bg_color.name(), "text_color": item.text_color.name(), "line_color": item.line_color.name() if item.line_color else None, "font": item.font_family})
                 valid_node_ids.add(item.node_id)
                 
         for item in items:
             if isinstance(item, EdgeItem) and item not in getattr(self.scene, 'preview_items', []):
                 if selected_only and (item.source_node.node_id not in valid_node_ids or item.target_node.node_id not in valid_node_ids): continue
                 offset = {"x": item.text_item.manual_offset.x(), "y": item.text_item.manual_offset.y()} if item.text_item.manual_offset else None
-                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "arrow": item.arrow, "font": item.font_family, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
+                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "arrow": item.arrow, "line_color": item.line_color.name() if item.line_color else None, "font": item.font_family, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
                 
         for item in items:
             if type(item) == QGraphicsItemGroup:
@@ -338,7 +354,8 @@ class MainWindow(QMainWindow):
         id_map = {}
 
         for n in data.get("nodes", []):
-            node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"), w=n.get("w", 100), h=n.get("h", 50))
+            new_id = str(uuid.uuid4()) if generate_new_ids else n.get("id")
+            node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"), w=n.get("w", 100), h=n.get("h", 50), line_color=n.get("line_color"))
             if n.get("font"): node.set_font_family(n.get("font"))
             self.scene.items_ref.append(node); self.scene.addItem(node); id_map[n.get("id")] = node
             if not clear_scene: node.setSelected(True)
@@ -346,7 +363,7 @@ class MainWindow(QMainWindow):
         for e in data.get("edges", []):
             src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
             if src and tgt:
-                edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "end"))
+                edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "end"), line_color=e.get("line_color"))
                 if e.get("font"): edge.set_font_family(e.get("font"))
                 if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
                 for w in e.get("waypoints", []):
@@ -518,7 +535,8 @@ class MainWindow(QMainWindow):
         tb_style = QToolBar("書式"); self.addToolBar(tb_style)
         act_bg = self.create_icon_action('fa5s.fill-drip', "背景", self.change_bg_color)
         act_fg = self.create_icon_action('fa5s.font', "文字色", self.change_text_color)
-        tb_style.addAction(act_fg)
+        act_ln = self.create_icon_action('fa5s.pen', "線の色", self.change_line_color)
+        tb_style.addActions([act_bg, act_fg, act_ln])
         tb_style.addSeparator()
         tb_style.addWidget(QLabel("フォント:")); self.cb_font = QComboBox(); self.cb_font.addItems(["ＭＳ ゴシック", "標準SHXフォント", "unicode"]); self.cb_font.currentTextChanged.connect(self.change_font_family); tb_style.addWidget(self.cb_font)
         tb_style.addSeparator()
@@ -785,6 +803,16 @@ class MainWindow(QMainWindow):
         if not nodes: return
         c = QColorDialog.getColor(nodes[0].text_color, self, "文字色")
         if c.isValid(): [n.set_text_color(c) for n in nodes]; self.push_undo_state("文字色変更")
+
+    def change_line_color(self):
+        items = self.scene.selectedItems()
+        target_items = [i for i in items if isinstance(i, (NodeItem, EdgeItem))]
+        if not target_items: return
+        initial_color = target_items[0].line_color if target_items[0].line_color else QColor(Qt.GlobalColor.black)
+        c = QColorDialog.getColor(initial_color, self, "線の色")
+        if c.isValid():
+            for i in target_items: i.set_line_color(c)
+            self.push_undo_state("線の色変更")
 
     def change_edge_style(self):
         edges = [i for i in self.scene.selectedItems() if isinstance(i, EdgeItem)]

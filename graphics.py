@@ -92,22 +92,22 @@ class FlowchartView(QGraphicsView):
 
 
 class NodeItem(QGraphicsPathItem):
-    def __init__(self, x, y, text="Node", node_type="process", node_id=None, bg_color="#E1F5FE", text_color="#000000", w=100, h=50):
+    def __init__(self, x, y, text="Node", node_type="process", node_id=None, bg_color="#E1F5FE", text_color="#000000", w=100, h=50, line_color=None):
         super().__init__()
         self.node_type = node_type
         self.node_id = node_id if node_id else str(uuid.uuid4())
         self.edges = []
         self.bg_color = QColor(bg_color)
         self.text_color = QColor(text_color)
+        self.line_color = QColor(line_color) if line_color else None
         self.font_family = "ＭＳ ゴシック"
         self.w = w
         self.h = h
-        self.default_pen = QPen(Qt.GlobalColor.black, 2)
         self._is_highlighted = False
         
         self.setPos(x, y)
         self.setBrush(QBrush(self.bg_color))
-        self.setPen(self.default_pen)
+        self.update_pen()
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         
         self.text_item = QGraphicsTextItem(text)
@@ -165,6 +165,20 @@ class NodeItem(QGraphicsPathItem):
     def set_text_color(self, color: QColor):
         self.text_color = color; self.text_item.setDefaultTextColor(self.text_color)
 
+    def set_line_color(self, color: QColor):
+        self.line_color = color; self.update_pen()
+
+    def update_pen(self):
+        if self.line_color:
+            color = self.line_color
+        else:
+            color = Qt.GlobalColor.black
+            if self.scene() and hasattr(self.scene(), 'main_window'):
+                if not self.scene().main_window.is_light_theme:
+                    color = QColor("#E0E0E0") # 明るいグレー
+        self.default_pen = QPen(color, 2)
+        self.update()
+
     def set_highlight(self, active: bool):
         if self._is_highlighted != active: self._is_highlighted = active; self.update() 
 
@@ -176,6 +190,8 @@ class NodeItem(QGraphicsPathItem):
             return QPointF(round(value.x()/GRID_SIZE)*GRID_SIZE, round(value.y()/GRID_SIZE)*GRID_SIZE)
         elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             for edge in self.edges: edge.update_position()
+        elif change == QGraphicsItem.GraphicsItemChange.ItemSceneHasChanged:
+            self.update_pen()
         return super().itemChange(change, value)
 
     def paint(self, painter, option, widget=None):
@@ -228,8 +244,16 @@ class EdgeTextItem(QGraphicsTextItem):
         super().__init__(text)
         self.edge = edge
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
-        self.setParentItem(edge); self.setDefaultTextColor(QColor("#333333"))
+        self.setParentItem(edge)
+        self.update_style()
         self.manual_offset = None; self._is_dragging = False
+
+    def update_style(self):
+        color = QColor("#333333")
+        if self.scene() and hasattr(self.scene(), 'main_window'):
+            if not self.scene().main_window.is_light_theme:
+                color = QColor("#F8F9FA")
+        self.setDefaultTextColor(color)
 
     def mousePressEvent(self, event): self._is_dragging = True; super().mousePressEvent(event)
     def mouseReleaseEvent(self, event): self._is_dragging = False; super().mouseReleaseEvent(event)
@@ -238,6 +262,8 @@ class EdgeTextItem(QGraphicsTextItem):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self._is_dragging:
             base_pos = self.edge.get_auto_text_pos()
             if base_pos is not None: self.manual_offset = value - base_pos
+        elif change == QGraphicsItem.GraphicsItemChange.ItemSceneHasChanged:
+            self.update_style()
         return super().itemChange(change, value)
 
     def mouseDoubleClickEvent(self, event):
@@ -268,7 +294,7 @@ def clip_line_to_node(p_start: QPointF, p_end: QPointF, node: NodeItem) -> QPoin
 
 
 class EdgeItem(QGraphicsPathItem):
-    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight", arrow="end"):
+    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight", arrow="end", line_color=None):
         super().__init__()
         self.source_node = source_node
         self.target_node = target_node
@@ -280,6 +306,7 @@ class EdgeItem(QGraphicsPathItem):
         self.line_style = style
         self.routing = routing
         self.arrow = arrow
+        self.line_color = QColor(line_color) if line_color else None
         self.font_family = "ＭＳ ゴシック"
         self.update_pen()
         
@@ -295,10 +322,22 @@ class EdgeItem(QGraphicsPathItem):
         self.text_item.setFont(f)
         self.update_position()
 
+    def set_line_color(self, color: QColor):
+        self.line_color = color; self.update_pen()
+
     def update_pen(self):
         style_map = {"solid": Qt.PenStyle.SolidLine, "dash": Qt.PenStyle.DashLine, "dot": Qt.PenStyle.DotLine}
         ps = style_map.get(self.line_style, Qt.PenStyle.SolidLine)
-        self.default_pen = QPen(Qt.GlobalColor.black, self.line_width, ps)
+        
+        if self.line_color:
+            color = self.line_color
+        else:
+            color = Qt.GlobalColor.black
+            if self.scene() and hasattr(self.scene(), 'main_window'):
+                if not self.scene().main_window.is_light_theme:
+                    color = QColor("#E0E0E0") # 明るいグレー
+        
+        self.default_pen = QPen(color, self.line_width, ps)
         self.setPen(self.default_pen)
 
     def boundingRect(self): return super().boundingRect().adjusted(-10, -10, 10, 10)
@@ -404,6 +443,11 @@ class EdgeItem(QGraphicsPathItem):
             pts = [self.source_node.scenePos()] + [wp.scenePos() for wp in self.waypoints] + [self.target_node.scenePos()]
             for i in range(len(pts)-1):
                 painter.drawEllipse(QPointF((pts[i].x()+pts[i+1].x())/2, (pts[i].y()+pts[i+1].y())/2), 5.0, 5.0)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemSceneHasChanged:
+            self.update_pen()
+        return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier: super().mousePressEvent(event); return
@@ -516,7 +560,7 @@ class FlowchartScene(QGraphicsScene):
                 if not self.preview_items:
                     id_map = {}
                     for n in self.main_window.clipboard_data.get("nodes", []):
-                        node = NodeItem(n["x"], n["y"], n["text"], n["type"], str(uuid.uuid4()), n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"))
+                        node = NodeItem(n["x"], n["y"], n["text"], n["type"], str(uuid.uuid4()), n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"), line_color=n.get("line_color"))
                         node.setOpacity(0.5); node.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                         node.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
                         node.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False); node.setZValue(1000)
@@ -525,7 +569,7 @@ class FlowchartScene(QGraphicsScene):
                     for e in self.main_window.clipboard_data.get("edges", []):
                         src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
                         if src and tgt:
-                            edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "end"))
+                            edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "end"), line_color=e.get("line_color"))
                             edge.setOpacity(0.5); edge.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
                             edge.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False); edge.setZValue(1000)
                             if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
