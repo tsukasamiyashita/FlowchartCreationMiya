@@ -154,10 +154,10 @@ class MainWindow(QMainWindow):
         self.current_tool = "select"
         self.clipboard_data = None
         self.clipboard_base_pos = None
-        self.is_light_theme = True
-        
         self.undo_stack = QUndoStack(self)
         self.last_state = {"nodes": [], "edges": [], "groups": []}
+        # テーマはライトモード固定
+        self.is_light_theme = True
 
         self.scene = FlowchartScene(self)
         self.scene.setSceneRect(-2000, -2000, 4000, 4000)
@@ -186,7 +186,7 @@ class MainWindow(QMainWindow):
         return act
 
     def apply_theme(self):
-        theme = "light" if self.is_light_theme else "dark"
+        theme = "light"
         app = QApplication.instance()
         if app:
             try:
@@ -220,10 +220,6 @@ class MainWindow(QMainWindow):
         else:
             self.scene.setBackgroundBrush(QBrush(QColor(30, 30, 30)))
         self.scene.update()
-
-    def toggle_theme(self):
-        self.is_light_theme = not self.is_light_theme
-        self.apply_theme()
 
     def toggle_grid(self):
         self.scene.draw_grid = not self.scene.draw_grid
@@ -354,8 +350,6 @@ class MainWindow(QMainWindow):
             act = QAction(txt, self); act.triggered.connect(lambda chk, m=mode: self.align_items(m)); arr_menu.addAction(act)
 
         view_menu = menubar.addMenu("表示(&V)")
-        act_theme = self.create_icon_action('fa5s.adjust', "テーマ切り替え (Light/Dark)", self.toggle_theme)
-        view_menu.addAction(act_theme)
         self.act_grid = self.create_icon_action('fa5s.th', "グリッド表示/非表示", self.toggle_grid, checkable=True)
         self.act_grid.setChecked(True); view_menu.addAction(self.act_grid)
         
@@ -389,7 +383,7 @@ class MainWindow(QMainWindow):
             ('fa5s.capsules', "端子 (Terminal)", "フローの開始（スタート）や終了（エンド）を示します。角丸またはカプセル型で表します。")
         ]
         
-        ic_color = 'gray' if self.is_light_theme else 'white'
+        ic_color = 'gray'
         for icon, title, desc in items:
             row = QHBoxLayout()
             label_icon = QLabel()
