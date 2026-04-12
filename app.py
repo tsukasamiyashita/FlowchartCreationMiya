@@ -241,14 +241,14 @@ class MainWindow(QMainWindow):
         
         for item in items:
             if isinstance(item, NodeItem) and getattr(self.scene, 'preview_node', None) != item and item not in getattr(self.scene, 'preview_items', []):
-                data["nodes"].append({"id": item.node_id, "type": item.node_type, "x": item.scenePos().x(), "y": item.scenePos().y(), "w": item.w, "h": item.h, "text": item.text_item.toPlainText(), "bg_color": item.bg_color.name(), "text_color": item.text_color.name()})
+                data["nodes"].append({"id": item.node_id, "type": item.node_type, "x": item.scenePos().x(), "y": item.scenePos().y(), "w": item.w, "h": item.h, "text": item.text_item.toPlainText(), "bg_color": item.bg_color.name(), "text_color": item.text_color.name(), "font": item.font_family})
                 valid_node_ids.add(item.node_id)
                 
         for item in items:
             if isinstance(item, EdgeItem) and item not in getattr(self.scene, 'preview_items', []):
                 if selected_only and (item.source_node.node_id not in valid_node_ids or item.target_node.node_id not in valid_node_ids): continue
                 offset = {"x": item.text_item.manual_offset.x(), "y": item.text_item.manual_offset.y()} if item.text_item.manual_offset else None
-                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "arrow": item.arrow, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
+                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "arrow": item.arrow, "font": item.font_family, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
                 
         for item in items:
             if type(item) == QGraphicsItemGroup:
@@ -265,8 +265,8 @@ class MainWindow(QMainWindow):
         id_map = {}
 
         for n in data.get("nodes", []):
-            new_id = str(uuid.uuid4()) if generate_new_ids else n.get("id", str(uuid.uuid4()))
             node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"), w=n.get("w", 100), h=n.get("h", 50))
+            if n.get("font"): node.set_font_family(n.get("font"))
             self.scene.items_ref.append(node); self.scene.addItem(node); id_map[n.get("id")] = node
             if not clear_scene: node.setSelected(True)
             
@@ -274,6 +274,7 @@ class MainWindow(QMainWindow):
             src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
             if src and tgt:
                 edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "end"))
+                if e.get("font"): edge.set_font_family(e.get("font"))
                 if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
                 for w in e.get("waypoints", []):
                     wp = WaypointItem(w["x"]+offset_x, w["y"]+offset_y, edge); edge.waypoints.append(wp); self.scene.items_ref.append(wp); self.scene.addItem(wp)
@@ -437,8 +438,9 @@ class MainWindow(QMainWindow):
         tb_style = QToolBar("書式"); self.addToolBar(tb_style)
         act_bg = self.create_icon_action('fa5s.fill-drip', "背景", self.change_bg_color)
         act_fg = self.create_icon_action('fa5s.font', "文字色", self.change_text_color)
-        tb_style.addAction(act_bg)
         tb_style.addAction(act_fg)
+        tb_style.addSeparator()
+        tb_style.addWidget(QLabel("フォント:")); self.cb_font = QComboBox(); self.cb_font.addItems(["ＭＳ ゴシック", "標準SHXフォント", "unicode"]); self.cb_font.currentTextChanged.connect(self.change_font_family); tb_style.addWidget(self.cb_font)
         tb_style.addSeparator()
         tb_style.addWidget(QLabel("線幅:")); self.cb_width = QComboBox(); self.cb_width.addItems(["1", "2", "3", "4", "5"]); self.cb_width.setCurrentText("2"); self.cb_width.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_width)
         tb_style.addWidget(QLabel("線種:")); self.cb_style = QComboBox(); self.cb_style.addItems(["実線(solid)", "破線(dash)", "点線(dot)"]); self.cb_style.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_style)
@@ -732,6 +734,14 @@ class MainWindow(QMainWindow):
             if n.scene(): self.scene.removeItem(n)
             if n in self.scene.items_ref: self.scene.items_ref.remove(n)
         self.push_undo_state("削除")
+
+    def change_font_family(self):
+        items = self.scene.selectedItems()
+        family = self.cb_font.currentText()
+        for item in items:
+            if hasattr(item, 'set_font_family'):
+                item.set_font_family(family)
+        self.push_undo_state("フォント変更")
 
     def zoom_in(self): self.view.scale(1.15, 1.15)
     def zoom_out(self): self.view.scale(1/1.15, 1/1.15)

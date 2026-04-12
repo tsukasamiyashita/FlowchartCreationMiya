@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QGraphicsScene, QGraphicsView, QGraphicsPathItem,
                              QInputDialog, QStyle, QGraphicsPixmapItem)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QByteArray, QBuffer, QIODevice
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QPainterPath, 
-                         QPainterPathStroker, QTransform, QUndoCommand, QCursor, QPolygonF, QPixmap, QImage)
+                         QPainterPathStroker, QTransform, QUndoCommand, QCursor, QPolygonF, QPixmap, QImage, QFont)
 
 GRID_SIZE = 20
 
@@ -62,6 +62,7 @@ class NodeItem(QGraphicsPathItem):
         self.edges = []
         self.bg_color = QColor(bg_color)
         self.text_color = QColor(text_color)
+        self.font_family = "ＭＳ ゴシック"
         self.w = w
         self.h = h
         self.default_pen = QPen(Qt.GlobalColor.black, 2)
@@ -76,8 +77,19 @@ class NodeItem(QGraphicsPathItem):
         self.text_item.setParentItem(self)
         self.text_item.setDefaultTextColor(self.text_color)
         
+        f = self.text_item.font()
+        f.setFamily(self.font_family)
+        self.text_item.setFont(f)
+        
         self.update_path()
         self.set_text(text)
+
+    def set_font_family(self, family):
+        self.font_family = family
+        f = self.text_item.font()
+        f.setFamily(family)
+        self.text_item.setFont(f)
+        self._update_text_pos()
 
     def update_path(self):
         path = QPainterPath()
@@ -226,11 +238,19 @@ class EdgeItem(QGraphicsPathItem):
         self.line_style = style
         self.routing = routing
         self.arrow = arrow
+        self.font_family = "ＭＳ ゴシック"
         self.update_pen()
         
         self.setZValue(-1); self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.text_item = EdgeTextItem("", self)
         self._set_label_html(label)
+        self.update_position()
+
+    def set_font_family(self, family):
+        self.font_family = family
+        f = self.text_item.font()
+        f.setFamily(family)
+        self.text_item.setFont(f)
         self.update_position()
 
     def update_pen(self):
@@ -245,7 +265,7 @@ class EdgeItem(QGraphicsPathItem):
     def _set_label_html(self, text):
         self.raw_text = text
         if text: 
-            self.text_item.setHtml(f"<div style='font-weight: bold; font-family: sans-serif; text-align: center;'>{text.replace(chr(10), '<br>')}</div>")
+            self.text_item.setHtml(f"<div style='font-weight: bold; font-family: {self.font_family}; text-align: center;'>{text.replace(chr(10), '<br>')}</div>")
             self.text_item.show()
         else: 
             self.text_item.setHtml("")
@@ -523,6 +543,8 @@ class FlowchartScene(QGraphicsScene):
             sx, sy = round(event.scenePos().x()/GRID_SIZE)*GRID_SIZE, round(event.scenePos().y()/GRID_SIZE)*GRID_SIZE
             self.clearSelection()
             node = NodeItem(sx, sy, text="Node", node_type=tool)
+            if hasattr(self.main_window, 'cb_font'):
+                node.set_font_family(self.main_window.cb_font.currentText())
             self.items_ref.append(node); self.addItem(node); self.main_window.push_undo_state(f"ノード追加 ({tool})")
             return
 
@@ -535,6 +557,8 @@ class FlowchartScene(QGraphicsScene):
                     self.main_window.statusBar().showMessage("エッジ接続モード: 2つ目のノードをクリック")
                 elif item != self.source_node:
                     edge = EdgeItem(self.source_node, item, routing=self.main_window.cb_routing.currentData(), arrow=self.main_window.cb_arrow.currentData())
+                    if hasattr(self.main_window, 'cb_font'):
+                        edge.set_font_family(self.main_window.cb_font.currentText())
                     self.source_node.add_edge(edge); item.add_edge(edge)
                     self.items_ref.append(edge); self.addItem(edge)
                     self.source_node.set_highlight(False); self.source_node = None
