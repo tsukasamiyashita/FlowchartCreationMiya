@@ -170,6 +170,7 @@ class MainWindow(QMainWindow):
         self.icon_actions = [] 
         self.init_menu()
         self.init_toolbars()
+        self.load_settings()
         self.apply_theme() 
         
         self.scene.selectionChanged.connect(self.on_selection_changed)
@@ -185,6 +186,77 @@ class MainWindow(QMainWindow):
         if slot: act.triggered.connect(slot)
         self.icon_actions.append((act, icon_name))
         return act
+
+    def get_config_path(self):
+        return os.path.join(os.path.expanduser("~"), "FlowchartCreationMiya", "settings.json")
+
+    def save_settings(self):
+        config_path = self.get_config_path()
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        
+        settings = {
+            "dxf_ver": self.cb_dxf_ver.currentIndex(),
+            "font": self.cb_font.currentText(),
+            "line_width": self.cb_width.currentText(),
+            "line_style": self.cb_style.currentText(),
+            "routing": self.cb_routing.currentIndex(),
+            "arrow": self.cb_arrow.currentIndex(),
+            "node_w": self.sb_node_w.value(),
+            "node_h": self.sb_node_h.value(),
+            "draw_grid": self.scene.draw_grid
+        }
+        
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=4, ensure_ascii=False)
+            QMessageBox.information(self, "完了", f"設定を保存しました:\n{config_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "エラー", f"設定の保存に失敗しました:\n{e}")
+
+    def load_settings(self):
+        config_path = self.get_config_path()
+        if not os.path.exists(config_path): return
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+                
+            if "dxf_ver" in settings: self.cb_dxf_ver.setCurrentIndex(settings["dxf_ver"])
+            if "font" in settings: self.cb_font.setCurrentText(settings["font"])
+            if "line_width" in settings: self.cb_width.setCurrentText(settings["line_width"])
+            if "line_style" in settings: self.cb_style.setCurrentText(settings["line_style"])
+            if "routing" in settings: self.cb_routing.setCurrentIndex(settings["routing"])
+            if "arrow" in settings: self.cb_arrow.setCurrentIndex(settings["arrow"])
+            if "node_w" in settings: self.sb_node_w.setValue(settings["node_w"])
+            if "node_h" in settings: self.sb_node_h.setValue(settings["node_h"])
+            if "draw_grid" in settings: 
+                self.scene.draw_grid = settings["draw_grid"]
+                self.act_grid.setChecked(settings["draw_grid"])
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
+
+    def reset_settings(self):
+        config_path = self.get_config_path()
+        if os.path.exists(config_path):
+            try:
+                os.remove(config_path)
+            except Exception as e:
+                print(f"Failed to delete settings file: {e}")
+        
+        # デフォルト値に戻す
+        self.cb_dxf_ver.setCurrentIndex(1)
+        self.cb_font.setCurrentText("ＭＳ ゴシック")
+        self.cb_width.setCurrentText("2")
+        self.cb_style.setCurrentIndex(0) # 実線(solid)
+        self.cb_routing.setCurrentIndex(0) # 直線
+        self.cb_arrow.setCurrentIndex(1) # 矢印(終端)
+        self.sb_node_w.setValue(100)
+        self.sb_node_h.setValue(50)
+        self.scene.draw_grid = True
+        self.act_grid.setChecked(True)
+        self.scene.update()
+        
+        QMessageBox.information(self, "リセット", "設定をデフォルトに戻しました。")
 
     def apply_theme(self):
         theme = "light" if self.is_light_theme else "dark"
@@ -298,7 +370,7 @@ class MainWindow(QMainWindow):
             self.last_state = new_state
 
     def update_window_title(self):
-        base = "FlowchartCreationMiya v1.3.0"
+        base = "FlowchartCreationMiya v1.4.0"
         self.setWindowTitle(f"{os.path.basename(self.current_filepath)} - {base}" if self.current_filepath else base)
 
     def init_menu(self):
@@ -370,7 +442,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "使い方", msg)
 
     def show_about(self): 
-        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.3.0\nPython & PyQt6 製フローチャート作成ツール")
+        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.4.0\nPython & PyQt6 製フローチャート作成ツール")
 
     def init_legend(self):
         dock = QDockWidget("ノード解説", self)
@@ -457,6 +529,11 @@ class MainWindow(QMainWindow):
         tb_style.addSeparator()
         tb_style.addWidget(QLabel("幅:")); self.sb_node_w = QDoubleSpinBox(); self.sb_node_w.setRange(20, 1000); self.sb_node_w.setSingleStep(20); self.sb_node_w.setValue(100); self.sb_node_w.valueChanged.connect(self.on_node_size_ui_changed); tb_style.addWidget(self.sb_node_w)
         tb_style.addWidget(QLabel("高さ:")); self.sb_node_h = QDoubleSpinBox(); self.sb_node_h.setRange(20, 1000); self.sb_node_h.setSingleStep(20); self.sb_node_h.setValue(50); self.sb_node_h.valueChanged.connect(self.on_node_size_ui_changed); tb_style.addWidget(self.sb_node_h)
+        tb_style.addSeparator()
+        act_save_cfg = self.create_icon_action('fa5s.save', "規定値として設定保存", self.save_settings)
+        tb_style.addAction(act_save_cfg)
+        act_reset_cfg = self.create_icon_action('fa5s.undo-alt', "設定をデフォルトに戻す", self.reset_settings)
+        tb_style.addAction(act_reset_cfg)
 
     def set_tool(self, tool_name):
         self.current_tool = tool_name
