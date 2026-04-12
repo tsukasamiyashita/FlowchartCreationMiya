@@ -3,12 +3,49 @@ import math
 import base64
 from PyQt6.QtWidgets import (QGraphicsScene, QGraphicsView, QGraphicsPathItem, 
                              QGraphicsTextItem, QGraphicsItem, QGraphicsEllipseItem, 
-                             QInputDialog, QStyle, QGraphicsPixmapItem)
+                             QInputDialog, QStyle, QGraphicsPixmapItem, QDialog, QVBoxLayout, 
+                             QHBoxLayout, QLabel, QTextEdit, QPushButton, QStyleFactory)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QByteArray, QBuffer, QIODevice
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QPainterPath, 
-                         QPainterPathStroker, QTransform, QUndoCommand, QCursor, QPolygonF, QPixmap, QImage, QFont)
+                         QPainterPathStroker, QTransform, QUndoCommand, QCursor, QPolygonF, QPixmap, QImage, QFont, QPalette)
 
 GRID_SIZE = 20
+
+class TextEditDialog(QDialog):
+    def __init__(self, parent, title, label_text, initial_text):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(400, 300)
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(label_text))
+        
+        self.editor = QTextEdit()
+        self.editor.setPlainText(initial_text)
+        
+        self.editor.setStyleSheet("""
+            QTextEdit { 
+                border: 2px solid #3b82f6; 
+                border-radius: 4px;
+                font-family: 'Segoe UI', 'Meiryo', sans-serif; 
+                font-size: 18px; 
+                padding: 10px;
+            }
+        """)
+        
+        layout.addWidget(self.editor)
+        
+        btns = QHBoxLayout()
+        self.ok_btn = QPushButton("OK"); self.ok_btn.clicked.connect(self.accept)
+        # OKボタンは目立つように青
+        self.ok_btn.setStyleSheet("background-color: #3b82f6; color: white; border: none; font-weight: bold;")
+        
+        self.cancel_btn = QPushButton("キャンセル"); self.cancel_btn.clicked.connect(self.reject)
+        btns.addStretch(); btns.addWidget(self.ok_btn); btns.addWidget(self.cancel_btn)
+        layout.addLayout(btns)
+        
+    def get_text(self):
+        return self.editor.toPlainText()
 
 class SceneStateCommand(QUndoCommand):
     def __init__(self, main_window, old_state, new_state, description):
@@ -148,8 +185,12 @@ class NodeItem(QGraphicsPathItem):
         painter.setBrush(self.brush()); painter.drawPath(self.path())
 
     def mouseDoubleClickEvent(self, event):
-        new_text, ok = QInputDialog.getMultiLineText(None, "テキスト編集", "ノード名:", self.text_item.toPlainText())
-        if ok: self.set_text(new_text); self.scene().main_window.push_undo_state("テキスト変更")
+        parent_win = self.scene().main_window if self.scene() and hasattr(self.scene(), 'main_window') else None
+        dialog = TextEditDialog(parent_win, "テキスト編集", "ノード名:", self.text_item.toPlainText())
+        if dialog.exec():
+            new_text = dialog.get_text()
+            self.set_text(new_text)
+            if parent_win: parent_win.push_undo_state("テキスト変更")
         super().mouseDoubleClickEvent(event)
 
 
@@ -200,11 +241,12 @@ class EdgeTextItem(QGraphicsTextItem):
         return super().itemChange(change, value)
 
     def mouseDoubleClickEvent(self, event):
-        new_text, ok = QInputDialog.getMultiLineText(None, "エッジのテキスト編集", "線上のテキスト:", self.edge.raw_text)
-        if ok: 
+        parent_win = self.scene().main_window if self.scene() and hasattr(self.scene(), 'main_window') else None
+        dialog = TextEditDialog(parent_win, "エッジのテキスト編集", "線上のテキスト:", self.edge.raw_text)
+        if dialog.exec():
+            new_text = dialog.get_text()
             self.edge.set_text(new_text)
-            if self.scene() and hasattr(self.scene(), 'main_window'):
-                self.scene().main_window.push_undo_state("エッジテキスト変更")
+            if parent_win: parent_win.push_undo_state("エッジテキスト変更")
 
     def paint(self, painter, option, widget=None):
         option.state &= ~QStyle.StateFlag.State_Selected
@@ -386,11 +428,13 @@ class EdgeItem(QGraphicsPathItem):
     def mouseReleaseEvent(self, event): self._drag_start_pos = None; self._potential_waypoint_index = -1; super().mouseReleaseEvent(event)
     
     def mouseDoubleClickEvent(self, event):
-        new_text, ok = QInputDialog.getMultiLineText(None, "エッジのテキスト編集", "線上のテキスト:", self.raw_text)
-        if ok:
+        parent_win = self.scene().main_window if self.scene() and hasattr(self.scene(), 'main_window') else None
+        dialog = TextEditDialog(parent_win, "エッジのテキスト編集", "線上のテキスト:", self.raw_text)
+        if dialog.exec():
+            new_text = dialog.get_text()
             self.set_text(new_text)
-            if self.scene() and hasattr(self.scene(), 'main_window'):
-                self.scene().main_window.push_undo_state("エッジテキスト変更")
+            if parent_win:
+                parent_win.push_undo_state("エッジテキスト変更")
         super().mouseDoubleClickEvent(event)
 
     def remove_waypoint(self, wp):

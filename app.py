@@ -21,6 +21,7 @@ import qdarktheme
 import networkx as nx
 import openpyxl
 import ezdxf
+import darkdetect
 
 # 同一ディレクトリにある graphics.py から描画コンポーネントをインポート
 from graphics import (GRID_SIZE, SceneStateCommand, FlowchartView, 
@@ -156,8 +157,8 @@ class MainWindow(QMainWindow):
         self.clipboard_base_pos = None
         self.undo_stack = QUndoStack(self)
         self.last_state = {"nodes": [], "edges": [], "groups": []}
-        # テーマはライトモード固定
-        self.is_light_theme = True
+        # システムのテーマ設定に合わせてライト・ダークを切り替える
+        self.is_light_theme = not darkdetect.isDark()
 
         self.scene = FlowchartScene(self)
         self.scene.setSceneRect(-2000, -2000, 4000, 4000)
@@ -186,7 +187,7 @@ class MainWindow(QMainWindow):
         return act
 
     def apply_theme(self):
-        theme = "light"
+        theme = "light" if self.is_light_theme else "dark"
         app = QApplication.instance()
         if app:
             try:
@@ -432,6 +433,13 @@ class MainWindow(QMainWindow):
         for act, _ in self.icon_actions:
             if act.text() in ["コピー(&C)", "貼り付け(&V)", "削除(&D)"]:
                 tb_edit.addAction(act)
+        
+        tb_cad = QToolBar("CAD設定"); self.addToolBar(tb_cad)
+        tb_cad.addWidget(QLabel("DXF版:")); self.cb_dxf_ver = QComboBox()
+        self.cb_dxf_ver.addItems(["2007", "2010", "2013", "2018"])
+        self.cb_dxf_ver.setItemData(0, "R2007"); self.cb_dxf_ver.setItemData(1, "R2010")
+        self.cb_dxf_ver.setItemData(2, "R2013"); self.cb_dxf_ver.setItemData(3, "R2018")
+        self.cb_dxf_ver.setCurrentIndex(1); tb_cad.addWidget(self.cb_dxf_ver)
         
         self.addToolBarBreak()
 
@@ -830,7 +838,7 @@ class MainWindow(QMainWindow):
         with open(path, "w", encoding="utf-8") as f: f.write("\n".join(lines))
 
     def _export_dxf(self, path):
-        doc = ezdxf.new('R2010'); msp = doc.modelspace()
+        doc = ezdxf.new(self.cb_dxf_ver.currentData()); msp = doc.modelspace()
         for item in self.scene.items():
             is_preview = False
             try:
