@@ -1,4 +1,4 @@
-FlowchartCreationMiya v1.4.0
+FlowchartCreationMiya v1.4.1
 
 世界標準の作図ツール（VisioやDraw.io）に匹敵する機能を備えた、プロ仕様のフローチャート作成デスクトップアプリです。
 PCにインストール等の複雑な環境構築は不要で、ダウンロードした実行ファイル(.exe)を開くだけですぐに使い始められます。
@@ -27,7 +27,7 @@ CAD連携: ワンクリックでJw_cad形式としてクリップボードへコ
 
 📥 ダウンロードと実行方法
 
-GitHubの [Releases] ページ、または Actionの [Artifacts] から FlowchartCreationMiya-v1.4.0.exe をダウンロードします。
+GitHubの [Releases] ページ、または Actionの [Artifacts] から FlowchartCreationMiya-v1.4.1.exe をダウンロードします。
 
 ダウンロードした .exe ファイルをダブルクリックして起動します。
 

@@ -393,7 +393,7 @@ class MainWindow(QMainWindow):
             self.last_state = new_state
 
     def update_window_title(self):
-        base = "FlowchartCreationMiya v1.4.0"
+        base = "FlowchartCreationMiya v1.4.1"
         self.setWindowTitle(f"{os.path.basename(self.current_filepath)} - {base}" if self.current_filepath else base)
 
     def init_menu(self):
@@ -465,7 +465,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "使い方", msg)
 
     def show_about(self): 
-        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.4.0\nPython & PyQt6 製フローチャート作成ツール")
+        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.4.1\nPython & PyQt6 製フローチャート作成ツール")
 
     def init_legend(self):
         dock = QDockWidget("ノード解説", self)
@@ -1053,7 +1053,7 @@ if __name__ == '__main__':
     # Windowsのタスクバーでアイコンを正しく表示させるための設定
     if sys.platform == 'win32':
         import ctypes
-        myappid = 'tsukasamiyashita.flowchartcreationmiya.v1.4.0' # 任意のユニークなID
+        myappid = 'tsukasamiyashita.flowchartcreationmiya.v1.4.1' # 任意のユニークなID
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app = QApplication(sys.argv)
