@@ -35,7 +35,9 @@ jobs:
         --noconsole 
         --clean 
         --name "FlowchartCreationMiya-v1.4.0" 
+        --icon "icon.ico"
         --add-data "README.MD;."
+        --add-data "icon.ico;."
         --collect-all PyQt6
         --collect-all qtawesome
         --collect-all pyqtdarktheme

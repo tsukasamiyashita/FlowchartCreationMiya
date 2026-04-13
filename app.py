@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QToolBar, QFileDialog, Q
                              QProxyStyle, QStyle, QDockWidget)
 from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QMarginsF
 from PyQt6.QtGui import (QPen, QBrush, QColor, QPainter, QImage, QTransform, QAction, QActionGroup,
-                         QPageSize, QPageLayout, QUndoStack, QCursor, QPixmap, QPolygonF)
+                         QPageSize, QPageLayout, QUndoStack, QCursor, QPixmap, QPolygonF, QIcon)
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewWidget, QPrinterInfo
 from PyQt6.QtSvg import QSvgGenerator
 
@@ -165,6 +165,12 @@ class MainWindow(QMainWindow):
 
         self.view = FlowchartView(self.scene)
         self.setCentralWidget(self.view)
+        
+        # ウィンドウアイコンの設定
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+            
         self.init_legend()
 
         self.icon_actions = [] 
@@ -720,7 +726,7 @@ class MainWindow(QMainWindow):
             elif n["type"] == "data": style = "shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;"
             
             cell = ET.SubElement(root, 'mxCell', id=n["id"], value=n["text"].replace('\n', '<br>'), style=style, vertex="1", parent="1")
-            ET.SubElement(cell, 'mxGeometry', x=str(n["x"]-50), y=str(n["y"]-25), width="100", height="50", **{'as': 'geometry'})
+            ET.SubElement(cell, 'mxGeometry', x=str(n["x"]-n["w"]/2), y=str(n["y"]-n["h"]/2), width=str(n["w"]), height=str(n["h"]), **{'as': 'geometry'})
 
         for i, e in enumerate(data["edges"]):
             style = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" if e.get("routing")=="orthogonal" else "html=1;"
@@ -953,11 +959,17 @@ class MainWindow(QMainWindow):
             
             if isinstance(item, NodeItem):
                 x, y = item.scenePos().x(), -item.scenePos().y(); t = item.node_type
-                if t == "process": coords = [(x-50, y+25), (x+50, y+25), (x+50, y-25), (x-50, y-25)]
-                elif t == "decision": coords = [(x, y+35), (x+60, y), (x, y-35), (x-60, y)]
-                elif t == "data": coords = [(x-35, y+25), (x+65, y+25), (x+35, y-25), (x-65, y-25)]
-                elif t == "terminal": coords = [(x-35, y+25), (x+35, y+25), (x+50, y), (x+35, y-25), (x-35, y-25), (x-50, y)]
-                else: coords = [(x-50, y+25), (x+50, y+25), (x+50, y-25), (x-50, y-25)]
+                hw, hh = item.w / 2, item.h / 2
+                if t == "process": coords = [(x-hw, y+hh), (x+hw, y+hh), (x+hw, y-hh), (x-hw, y-hh)]
+                elif t == "decision": 
+                    dw, dh = hw + 10, hh + 10
+                    coords = [(x, y+dh), (x+dw, y), (x, y-dh), (x-dw, y)]
+                elif t == "data":
+                    skew = hh
+                    coords = [(x-hw+skew/2, y+hh), (x+hw+skew/2, y+hh), (x+hw-skew/2, y-hh), (x-hw-skew/2, y-hh)]
+                elif t == "terminal":
+                    coords = [(x-hw+hh, y+hh), (x+hw-hh, y+hh), (x+hw, y+hh/2), (x+hw, y-hh/2), (x+hw-hh, y-hh), (x-hw+hh, y-hh), (x-hw, y-hh/2), (x-hw, y+hh/2)]
+                else: coords = [(x-hw, y+hh), (x+hw, y+hh), (x+hw, y-hh), (x-hw, y-hh)]
                 msp.add_lwpolyline(coords, close=True)
                 if item.text_item.toPlainText():
                     ls = item.text_item.toPlainText().split('\n'); sy = y + (len(ls)-1)*7.5
@@ -997,13 +1009,19 @@ class MainWindow(QMainWindow):
             
             if isinstance(item, NodeItem):
                 x, y = item.scenePos().x(), -item.scenePos().y(); t = item.node_type
+                hw, hh = item.w / 2, item.h / 2
                 def add_p(ps):
                     for i in range(len(ps)): td.append(f"{ps[i][0]} {ps[i][1]} {ps[(i+1)%len(ps)][0]} {ps[(i+1)%len(ps)][1]}")
-                if t == "process": add_p([(x-50, y-25), (x+50, y-25), (x+50, y+25), (x-50, y+25)])
-                elif t == "decision": add_p([(x, y-35), (x+60, y), (x, y+35), (x-60, y)])
-                elif t == "data": add_p([(x-35, y-25), (x+65, y-25), (x+35, y+25), (x-65, y+25)])
-                elif t == "terminal": add_p([(x-35, y-25), (x+35, y-25), (x+50, y), (x+35, y+25), (x-35, y+25), (x-50, y)])
-                else: add_p([(x-50, y-25), (x+50, y-25), (x+50, y+25), (x-50, y+25)])
+                if t == "process": add_p([(x-hw, y-hh), (x+hw, y-hh), (x+hw, y+hh), (x-hw, y+hh)])
+                elif t == "decision": 
+                    dw, dh = hw + 10, hh + 10
+                    add_p([(x, y-dh), (x+dw, y), (x, y+dh), (x-dw, y)])
+                elif t == "data":
+                    skew = hh
+                    add_p([(x-hw+skew/2, y-hh), (x+hw+skew/2, y-hh), (x+hw-skew/2, y+hh), (x-hw-skew/2, y+hh)])
+                elif t == "terminal":
+                    add_p([(x-hw+hh, y-hh), (x+hw-hh, y-hh), (x+hw, y-hh/2), (x+hw, y+hh/2), (x+hw-hh, y+hh), (x-hw+hh, y+hh), (x-hw, y+hh/2), (x-hw, y-hh/2)])
+                else: add_p([(x-hw, y-hh), (x+hw, y-hh), (x+hw, y+hh), (x-hw, y+hh)])
                 if item.text_item.toPlainText():
                     ls = item.text_item.toPlainText().split('\n'); sy = y + (len(ls)-1)*7.5
                     for i, l in enumerate(ls): wc = sum(2 if unicodedata.east_asian_width(c) in 'FWA' else 1 for c in l); td.append(f'ch {x-wc*2.5} {sy-i*15-6.0} 10 0 "{l}')
@@ -1032,6 +1050,12 @@ class MainWindow(QMainWindow):
         CustomPrintPreviewDialog(self, len(self.scene.selectedItems()) > 0).exec()
 
 if __name__ == '__main__':
+    # Windowsのタスクバーでアイコンを正しく表示させるための設定
+    if sys.platform == 'win32':
+        import ctypes
+        myappid = 'tsukasamiyashita.flowchartcreationmiya.v1.4.0' # 任意のユニークなID
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
     app = QApplication(sys.argv)
     window = MainWindow()
     window.showMaximized()
