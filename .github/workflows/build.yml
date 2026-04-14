@@ -40,7 +40,7 @@ jobs:
         --add-data "icon.ico;."
         --collect-all PyQt6
         --collect-all qtawesome
-        --collect-all pyqtdarktheme
+        --collect-all qdarktheme
         app.py
 
     # 完成したexeファイルをGitHub上にアップロード
