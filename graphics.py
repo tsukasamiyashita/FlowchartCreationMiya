@@ -80,6 +80,9 @@ class FlowchartView(QGraphicsView):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             if event.angleDelta().y() > 0: self.scale(self.zoom_factor, self.zoom_factor)
             else: self.scale(1 / self.zoom_factor, 1 / self.zoom_factor)
+        elif event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
+            delta = event.angleDelta().y()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta)
         else:
             super().wheelEvent(event)
 
@@ -88,19 +91,38 @@ class FlowchartView(QGraphicsView):
             self.scene().hide_preview_node()
         super().leaveEvent(event)
 
+    def keyPressEvent(self, event):
+        if event.key() in [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]:
+            if self.scene() and hasattr(self.scene(), 'main_window'):
+                self.scene().main_window.keyPressEvent(event)
+                return
+        super().keyPressEvent(event)
+
 
 
 
 class NodeItem(QGraphicsPathItem):
-    def __init__(self, x, y, text="Node", node_type="process", node_id=None, bg_color="#E1F5FE", text_color="#000000", w=100, h=50, line_color=None):
+    def __init__(self, x, y, text="Node", node_type="process", node_id=None, bg_color=None, text_color=None, w=100, h=50, line_color=None, font_size=9):
         super().__init__()
         self.node_type = node_type
         self.node_id = node_id if node_id else str(uuid.uuid4())
         self.edges = []
-        self.bg_color = QColor(bg_color)
-        self.text_color = QColor(text_color)
+        
+        # デフォルト背景色の決定
+        if bg_color:
+            self.bg_color = QColor(bg_color)
+        else:
+            self.bg_color = QColor(0,0,0,0) if node_type == "text" else QColor("#E1F5FE")
+        
+        # デフォルト文字色の決定
+        if text_color:
+            self.text_color = QColor(text_color)
+        else:
+            self.text_color = QColor("#000000") # デフォルト。後でupdate_styleで補正
+        
         self.line_color = QColor(line_color) if line_color else None
         self.font_family = "ＭＳ ゴシック"
+        self.font_size = font_size
         self.w = w
         self.h = h
         self._is_highlighted = False
@@ -116,6 +138,7 @@ class NodeItem(QGraphicsPathItem):
         
         f = self.text_item.font()
         f.setFamily(self.font_family)
+        f.setPointSize(int(self.font_size))
         self.text_item.setFont(f)
         
         self.update_path()
@@ -128,10 +151,17 @@ class NodeItem(QGraphicsPathItem):
         self.text_item.setFont(f)
         self._update_text_pos()
 
+    def set_font_size(self, size):
+        self.font_size = size
+        f = self.text_item.font()
+        f.setPointSize(int(size))
+        self.text_item.setFont(f)
+        self._update_text_pos()
+
     def update_path(self):
         path = QPainterPath()
         hw, hh = self.w / 2, self.h / 2
-        if self.node_type == "process":
+        if self.node_type == "process" or self.node_type == "text":
             path.addRect(QRectF(-hw, -hh, self.w, self.h))
         elif self.node_type == "decision":
             path.moveTo(0, -hh-10); path.lineTo(hw+10, 0); path.lineTo(0, hh+10); path.lineTo(-hw-10, 0); path.closeSubpath()
@@ -168,6 +198,31 @@ class NodeItem(QGraphicsPathItem):
     def set_line_color(self, color: QColor):
         self.line_color = color; self.update_pen()
 
+    def update_style(self):
+        # 枠線の更新
+        self.update_pen()
+        
+        # テキスト項目や、特定の背景色の場合は文字色の視認性を確保
+        if self.scene() and hasattr(self.scene(), 'main_window'):
+            is_light = self.scene().main_window.is_light_theme
+            
+            # テキスト項目の文字色自動調整
+            if self.node_type == "text":
+                # 黒系ならダークモードで白系に、白系ならライトモードで黒系に
+                if not is_light and (self.text_color == QColor("#000000") or self.text_color == QColor(Qt.GlobalColor.black)):
+                    self.set_text_color(QColor("#F8F9FA"))
+                elif is_light and (self.text_color == QColor("#F8F9FA") or self.text_color == QColor(Qt.GlobalColor.white)):
+                    self.set_text_color(QColor("#000000"))
+            else:
+                # 形状があるノードの場合、背景がデフォルトかつダークモードなら背景も少し暗くする調整等も検討可能
+                if not is_light and self.bg_color == QColor("#E1F5FE"):
+                    # ユーザーが明示的にパステルブルーを選んでいない（デフォルト）とみなし、ダークモード用の色にする
+                    self.set_bg_color(QColor("#263238"))
+                    self.set_text_color(QColor("#F8F9FA"))
+                elif is_light and self.bg_color == QColor("#263238"):
+                    self.set_bg_color(QColor("#E1F5FE"))
+                    self.set_text_color(QColor("#000000"))
+
     def update_pen(self):
         if self.line_color:
             color = self.line_color
@@ -191,18 +246,21 @@ class NodeItem(QGraphicsPathItem):
         elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             for edge in self.edges: edge.update_position()
         elif change == QGraphicsItem.GraphicsItemChange.ItemSceneHasChanged:
-            self.update_pen()
+            self.update_style()
         return super().itemChange(change, value)
 
     def paint(self, painter, option, widget=None):
         if self._is_highlighted: painter.setPen(QPen(QColor("#FF5722"), 3, Qt.PenStyle.DashLine))
         elif self.isSelected(): painter.setPen(QPen(QColor("#3B82F6"), 3))
-        else: painter.setPen(self.default_pen)
+        else:
+            if self.node_type == "text": return # テキストモードかつ非選択時は枠を描画しない
+            painter.setPen(self.default_pen)
         painter.setBrush(self.brush()); painter.drawPath(self.path())
 
     def mouseDoubleClickEvent(self, event):
         parent_win = self.scene().main_window if self.scene() and hasattr(self.scene(), 'main_window') else None
-        dialog = TextEditDialog(parent_win, "テキスト編集", "ノード名:", self.text_item.toPlainText())
+        label = "テキスト:" if self.node_type == "text" else "ノード名:"
+        dialog = TextEditDialog(parent_win, "テキスト編集", label, self.text_item.toPlainText())
         if dialog.exec():
             new_text = dialog.get_text()
             self.set_text(new_text)
@@ -266,14 +324,6 @@ class EdgeTextItem(QGraphicsTextItem):
             self.update_style()
         return super().itemChange(change, value)
 
-    def mouseDoubleClickEvent(self, event):
-        parent_win = self.scene().main_window if self.scene() and hasattr(self.scene(), 'main_window') else None
-        dialog = TextEditDialog(parent_win, "エッジのテキスト編集", "線上のテキスト:", self.edge.raw_text)
-        if dialog.exec():
-            new_text = dialog.get_text()
-            self.edge.set_text(new_text)
-            if parent_win: parent_win.push_undo_state("エッジテキスト変更")
-
     def paint(self, painter, option, widget=None):
         option.state &= ~QStyle.StateFlag.State_Selected
         super().paint(painter, option, widget)
@@ -294,7 +344,7 @@ def clip_line_to_node(p_start: QPointF, p_end: QPointF, node: NodeItem) -> QPoin
 
 
 class EdgeItem(QGraphicsPathItem):
-    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight", arrow="end", line_color=None):
+    def __init__(self, source_node, target_node, label="", width=2, style="solid", routing="straight", arrow="end", line_color=None, font_size=9):
         super().__init__()
         self.source_node = source_node
         self.target_node = target_node
@@ -308,6 +358,7 @@ class EdgeItem(QGraphicsPathItem):
         self.arrow = arrow
         self.line_color = QColor(line_color) if line_color else None
         self.font_family = "ＭＳ ゴシック"
+        self.font_size = font_size
         self.update_pen()
         
         self.setZValue(-1); self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
@@ -319,6 +370,13 @@ class EdgeItem(QGraphicsPathItem):
         self.font_family = family
         f = self.text_item.font()
         f.setFamily(family)
+        self.text_item.setFont(f)
+        self.update_position()
+
+    def set_font_size(self, size):
+        self.font_size = size
+        f = self.text_item.font()
+        f.setPointSize(int(size))
         self.text_item.setFont(f)
         self.update_position()
 
@@ -471,16 +529,6 @@ class EdgeItem(QGraphicsPathItem):
 
     def mouseReleaseEvent(self, event): self._drag_start_pos = None; self._potential_waypoint_index = -1; super().mouseReleaseEvent(event)
     
-    def mouseDoubleClickEvent(self, event):
-        parent_win = self.scene().main_window if self.scene() and hasattr(self.scene(), 'main_window') else None
-        dialog = TextEditDialog(parent_win, "エッジのテキスト編集", "線上のテキスト:", self.raw_text)
-        if dialog.exec():
-            new_text = dialog.get_text()
-            self.set_text(new_text)
-            if parent_win:
-                parent_win.push_undo_state("エッジテキスト変更")
-        super().mouseDoubleClickEvent(event)
-
     def remove_waypoint(self, wp):
         if wp in self.waypoints:
             self.waypoints.remove(wp); self.scene().removeItem(wp)
@@ -521,7 +569,7 @@ class FlowchartScene(QGraphicsScene):
     def update_preview_node(self, pos=None, tool=None):
         if tool is None: tool = self.main_window.current_tool
 
-        if tool not in ["process", "decision", "data", "terminal"]:
+        if tool not in ["process", "decision", "data", "terminal", "text"]:
             try:
                 if self.preview_node:
                     self.removeItem(self.preview_node)
@@ -536,7 +584,7 @@ class FlowchartScene(QGraphicsScene):
                     self.preview_items = []
             except RuntimeError: self.preview_items = []
 
-        if tool in ["process", "decision", "data", "terminal"]:
+        if tool in ["process", "decision", "data", "terminal", "text"]:
             try:
                 if self.preview_node and self.preview_node.node_type != tool:
                     self.removeItem(self.preview_node); self.preview_node = None
@@ -627,10 +675,21 @@ class FlowchartScene(QGraphicsScene):
                     # 何もない場所をクリックした場合は全解除
                     self.clearSelection()
         
-        if tool in ["process", "decision", "data", "terminal"] and event.button() == Qt.MouseButton.LeftButton:
+        if tool in ["process", "decision", "data", "terminal", "text"] and event.button() == Qt.MouseButton.LeftButton:
             sx, sy = round(event.scenePos().x()/GRID_SIZE)*GRID_SIZE, round(event.scenePos().y()/GRID_SIZE)*GRID_SIZE
             self.clearSelection()
-            node = NodeItem(sx, sy, text="Node", node_type=tool)
+            
+            initial_text = "Node"
+            if tool == "text":
+                dialog = TextEditDialog(self.main_window, "テキスト入力", "表示するテキスト:", "")
+                if dialog.exec():
+                    initial_text = dialog.get_text()
+                    if not initial_text: return
+                else:
+                    return
+            
+            font_size = int(self.main_window.cb_font_size.currentText()) if hasattr(self.main_window, 'cb_font_size') else 9
+            node = NodeItem(sx, sy, text=initial_text, node_type=tool, font_size=font_size)
             if hasattr(self.main_window, 'cb_font'):
                 node.set_font_family(self.main_window.cb_font.currentText())
             self.items_ref.append(node); self.addItem(node); self.main_window.push_undo_state(f"ノード追加 ({tool})")
@@ -644,7 +703,8 @@ class FlowchartScene(QGraphicsScene):
                     self.source_node = item; self.source_node.set_highlight(True)
                     self.main_window.statusBar().showMessage("エッジ接続モード: 2つ目のノードをクリック")
                 elif item != self.source_node:
-                    edge = EdgeItem(self.source_node, item, routing=self.main_window.cb_routing.currentData(), arrow=self.main_window.cb_arrow.currentData())
+                    font_size = int(self.main_window.cb_font_size.currentText()) if hasattr(self.main_window, 'cb_font_size') else 9
+                    edge = EdgeItem(self.source_node, item, routing=self.main_window.cb_routing.currentData(), arrow=self.main_window.cb_arrow.currentData(), font_size=font_size)
                     if hasattr(self.main_window, 'cb_font'):
                         edge.set_font_family(self.main_window.cb_font.currentText())
                     self.source_node.add_edge(edge); item.add_edge(edge)
@@ -679,7 +739,7 @@ class FlowchartScene(QGraphicsScene):
     def mouseMoveEvent(self, event):
         if self.selectedItems(): self.main_window.is_moving = True
         tool = self.main_window.current_tool
-        if tool in ["process", "decision", "data", "terminal", "paste"]: self.update_preview_node(event.scenePos(), tool)
+        if tool in ["process", "decision", "data", "terminal", "text", "paste"]: self.update_preview_node(event.scenePos(), tool)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):

@@ -213,6 +213,7 @@ class MainWindow(QMainWindow):
             "arrow": self.cb_arrow.currentIndex(),
             "node_w": self.sb_node_w.value(),
             "node_h": self.sb_node_h.value(),
+            "font_size": self.cb_font_size.currentText(),
             "draw_grid": self.scene.draw_grid
         }
         
@@ -239,6 +240,7 @@ class MainWindow(QMainWindow):
             if "arrow" in settings: self.cb_arrow.setCurrentIndex(settings["arrow"])
             if "node_w" in settings: self.sb_node_w.setValue(settings["node_w"])
             if "node_h" in settings: self.sb_node_h.setValue(settings["node_h"])
+            if "font_size" in settings: self.cb_font_size.setCurrentText(settings["font_size"])
             if "draw_grid" in settings: 
                 self.scene.draw_grid = settings["draw_grid"]
                 self.act_grid.setChecked(settings["draw_grid"])
@@ -336,14 +338,14 @@ class MainWindow(QMainWindow):
         
         for item in items:
             if isinstance(item, NodeItem) and getattr(self.scene, 'preview_node', None) != item and item not in getattr(self.scene, 'preview_items', []):
-                data["nodes"].append({"id": item.node_id, "type": item.node_type, "x": item.scenePos().x(), "y": item.scenePos().y(), "w": item.w, "h": item.h, "text": item.text_item.toPlainText(), "bg_color": item.bg_color.name(), "text_color": item.text_color.name(), "line_color": item.line_color.name() if item.line_color else None, "font": item.font_family})
+                data["nodes"].append({"id": item.node_id, "type": item.node_type, "x": item.scenePos().x(), "y": item.scenePos().y(), "w": item.w, "h": item.h, "text": item.text_item.toPlainText(), "bg_color": item.bg_color.name(), "text_color": item.text_color.name(), "line_color": item.line_color.name() if item.line_color else None, "font": item.font_family, "font_size": item.font_size})
                 valid_node_ids.add(item.node_id)
                 
         for item in items:
             if isinstance(item, EdgeItem) and item not in getattr(self.scene, 'preview_items', []):
                 if selected_only and (item.source_node.node_id not in valid_node_ids or item.target_node.node_id not in valid_node_ids): continue
                 offset = {"x": item.text_item.manual_offset.x(), "y": item.text_item.manual_offset.y()} if item.text_item.manual_offset else None
-                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "arrow": item.arrow, "line_color": item.line_color.name() if item.line_color else None, "font": item.font_family, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
+                data["edges"].append({"source": item.source_node.node_id, "target": item.target_node.node_id, "label": item.raw_text, "width": item.line_width, "style": item.line_style, "routing": item.routing, "arrow": item.arrow, "line_color": item.line_color.name() if item.line_color else None, "font": item.font_family, "font_size": item.font_size, "waypoints": [{"x": wp.scenePos().x(), "y": wp.scenePos().y()} for wp in item.waypoints], "text_offset": offset})
                 
         for item in items:
             if type(item) == QGraphicsItemGroup:
@@ -361,7 +363,7 @@ class MainWindow(QMainWindow):
 
         for n in data.get("nodes", []):
             new_id = str(uuid.uuid4()) if generate_new_ids else n.get("id")
-            node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"), w=n.get("w", 100), h=n.get("h", 50), line_color=n.get("line_color"))
+            node = NodeItem(n["x"]+offset_x, n["y"]+offset_y, n["text"], n["type"], new_id, n.get("bg_color", "#E1F5FE"), n.get("text_color", "#000000"), w=n.get("w", 100), h=n.get("h", 50), line_color=n.get("line_color"), font_size=n.get("font_size", 9))
             if n.get("font"): node.set_font_family(n.get("font"))
             self.scene.items_ref.append(node); self.scene.addItem(node); id_map[n.get("id")] = node
             if not clear_scene: node.setSelected(True)
@@ -370,6 +372,7 @@ class MainWindow(QMainWindow):
             src, tgt = id_map.get(e["source"]), id_map.get(e["target"])
             if src and tgt:
                 edge = EdgeItem(src, tgt, e.get("label", ""), e.get("width", 2), e.get("style", "solid"), e.get("routing", "straight"), e.get("arrow", "end"), line_color=e.get("line_color"))
+                if e.get("font_size"): edge.set_font_size(e.get("font_size"))
                 if e.get("font"): edge.set_font_family(e.get("font"))
                 if e.get("text_offset"): edge.text_item.manual_offset = QPointF(e.get("text_offset")["x"], e.get("text_offset")["y"])
                 for w in e.get("waypoints", []):
@@ -393,7 +396,7 @@ class MainWindow(QMainWindow):
             self.last_state = new_state
 
     def update_window_title(self):
-        base = "FlowchartCreationMiya v1.4.1"
+        base = "FlowchartCreationMiya v1.5.0"
         self.setWindowTitle(f"{os.path.basename(self.current_filepath)} - {base}" if self.current_filepath else base)
 
     def init_menu(self):
@@ -465,7 +468,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "使い方", msg)
 
     def show_about(self): 
-        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.4.1\nPython & PyQt6 製フローチャート作成ツール")
+        QMessageBox.about(self, "情報", "FlowchartCreationMiya v1.5.0\nPython & PyQt6 製フローチャート作成ツール")
 
     def init_legend(self):
         dock = QDockWidget("ノード解説", self)
@@ -477,7 +480,8 @@ class MainWindow(QMainWindow):
             ('fa5s.square', "処理 (Process)", "一般的な処理や工程、計算に使います。長方形で表します。"),
             ('fa5s.code-branch', "分岐 (Decision)", "条件によってYes/Noなどが分かれる判断に使います。菱形で表します。"),
             ('fa5s.layer-group', "データ (Data)", "データの入出力や情報の流れを示します。平行四辺形で表します。"),
-            ('fa5s.capsules', "端子 (Terminal)", "フローの開始（スタート）や終了（エンド）を示します。角丸またはカプセル型で表します。")
+            ('fa5s.capsules', "端子 (Terminal)", "フローの開始（スタート）や終了（エンド）を示します。角丸またはカプセル型で表します。"),
+            ('fa5s.font', "テキスト (Text)", "図面内に自由にテキストを配置します。枠や背景はありません。")
         ]
         
         ic_color = 'gray'
@@ -505,19 +509,23 @@ class MainWindow(QMainWindow):
     def init_toolbars(self):
         tb_main = QToolBar("メインツール"); self.addToolBar(tb_main)
         self.action_group = QActionGroup(self)
+        self.tool_actions = {}
         self.btn_select = self.create_icon_action('fa5s.mouse-pointer', "選択", lambda: self.set_tool("select"), checkable=True)
         self.btn_select.setChecked(True)
         tb_main.addAction(self.btn_select)
         self.action_group.addAction(self.btn_select)
+        self.tool_actions["select"] = self.btn_select
         tb_main.addSeparator()
         
-        for icon_name, text, key in [("fa5s.square", "処理", "process"), ("fa5s.code-branch", "分岐", "decision"), ("fa5s.layer-group", "データ", "data"), ("fa5s.capsules", "端子", "terminal")]:
+        for icon_name, text, key in [("fa5s.square", "処理", "process"), ("fa5s.code-branch", "分岐", "decision"), ("fa5s.layer-group", "データ", "data"), ("fa5s.capsules", "端子", "terminal"), ("fa5s.font", "テキスト", "text")]:
             act = self.create_icon_action(icon_name, text, lambda chk, k=key: self.set_tool(k), checkable=True)
             tb_main.addAction(act); self.action_group.addAction(act)
+            self.tool_actions[key] = act
         
         tb_main.addSeparator()
         act_conn = self.create_icon_action('fa5s.link', "接続", lambda: self.set_tool("connect"), checkable=True)
         tb_main.addAction(act_conn); self.action_group.addAction(act_conn)
+        self.tool_actions["connect"] = act_conn
         tb_main.addSeparator()
         tb_main.addAction(self.act_grid)
 
@@ -545,6 +553,7 @@ class MainWindow(QMainWindow):
         tb_style.addActions([act_bg, act_fg, act_ln])
         tb_style.addSeparator()
         tb_style.addWidget(QLabel("フォント:")); self.cb_font = QComboBox(); self.cb_font.addItems(["ＭＳ ゴシック", "標準SHXフォント", "unicode"]); self.cb_font.currentTextChanged.connect(self.change_font_family); tb_style.addWidget(self.cb_font)
+        self.cb_font_size = QComboBox(); self.cb_font_size.addItems(["8", "9", "10", "11", "12", "14", "16", "18", "20", "24", "28", "32", "36", "48", "72"]); self.cb_font_size.setCurrentText("9"); self.cb_font_size.currentTextChanged.connect(self.change_font_size); tb_style.addWidget(self.cb_font_size)
         tb_style.addSeparator()
         tb_style.addWidget(QLabel("線幅:")); self.cb_width = QComboBox(); self.cb_width.addItems(["1", "2", "3", "4", "5"]); self.cb_width.setCurrentText("2"); self.cb_width.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_width)
         tb_style.addWidget(QLabel("線種:")); self.cb_style = QComboBox(); self.cb_style.addItems(["実線(solid)", "破線(dash)", "点線(dot)"]); self.cb_style.currentTextChanged.connect(self.change_edge_style); tb_style.addWidget(self.cb_style)
@@ -561,6 +570,9 @@ class MainWindow(QMainWindow):
 
     def set_tool(self, tool_name):
         self.current_tool = tool_name
+        if tool_name in self.tool_actions:
+            self.tool_actions[tool_name].setChecked(True)
+            
         if self.scene.source_node: self.scene.source_node.set_highlight(False); self.scene.source_node = None
         self.scene.clearSelection()
         
@@ -588,13 +600,22 @@ class MainWindow(QMainWindow):
             self.sb_node_h.blockSignals(True)
             self.sb_node_w.setValue(node.w)
             self.sb_node_h.setValue(node.h)
-            self.sb_node_w.blockSignals(False)
-            self.sb_node_h.blockSignals(False)
             self.sb_node_w.setEnabled(True)
             self.sb_node_h.setEnabled(True)
+            
+            # フォント設定の反映
+            self.cb_font.blockSignals(True); self.cb_font.setCurrentText(node.font_family); self.cb_font.blockSignals(False)
+            self.cb_font_size.blockSignals(True); self.cb_font_size.setCurrentText(str(int(node.font_size))); self.cb_font_size.blockSignals(False)
         else:
             self.sb_node_w.setEnabled(False)
             self.sb_node_h.setEnabled(False)
+            
+        # エッジも含めたフォント設定の同期（最初の一つに合わせる）
+        all_items = [i for i in sel if hasattr(i, 'font_family')]
+        if all_items:
+            item = all_items[0]
+            self.cb_font.blockSignals(True); self.cb_font.setCurrentText(item.font_family); self.cb_font.blockSignals(False)
+            self.cb_font_size.blockSignals(True); self.cb_font_size.setCurrentText(str(int(item.font_size))); self.cb_font_size.blockSignals(False)
 
     def on_node_size_ui_changed(self):
         nodes = [i for i in self.scene.selectedItems() if isinstance(i, NodeItem)]
@@ -698,6 +719,7 @@ class MainWindow(QMainWindow):
                     ntype = "process"
                     if "rhombus" in style: ntype = "decision"
                     elif "ellipse" in style: ntype = "terminal"
+                    elif "text" in style: ntype = "text"
                     node = NodeItem(x, y, txt, ntype, cid)
                     self.scene.items_ref.append(node); self.scene.addItem(node); id_map[cid] = node
 
@@ -724,6 +746,7 @@ class MainWindow(QMainWindow):
             if n["type"] == "decision": style = "rhombus;whiteSpace=wrap;html=1;"
             elif n["type"] == "terminal": style = "ellipse;whiteSpace=wrap;html=1;"
             elif n["type"] == "data": style = "shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;"
+            elif n["type"] == "text": style = "text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;"
             
             cell = ET.SubElement(root, 'mxCell', id=n["id"], value=n["text"].replace('\n', '<br>'), style=style, vertex="1", parent="1")
             ET.SubElement(cell, 'mxGeometry', x=str(n["x"]-n["w"]/2), y=str(n["y"]-n["h"]/2), width=str(n["w"]), height=str(n["h"]), **{'as': 'geometry'})
@@ -861,6 +884,16 @@ class MainWindow(QMainWindow):
             if hasattr(item, 'set_font_family'):
                 item.set_font_family(family)
         self.push_undo_state("フォント変更")
+
+    def change_font_size(self):
+        items = self.scene.selectedItems()
+        size_text = self.cb_font_size.currentText()
+        if not size_text: return
+        size = int(size_text)
+        for item in items:
+            if hasattr(item, 'set_font_size'):
+                item.set_font_size(size)
+        self.push_undo_state("フォントサイズ変更")
 
     def zoom_in(self): self.view.scale(1.15, 1.15)
     def zoom_out(self): self.view.scale(1/1.15, 1/1.15)
@@ -1049,11 +1082,22 @@ class MainWindow(QMainWindow):
     def open_print_dialog(self): 
         CustomPrintPreviewDialog(self, len(self.scene.selectedItems()) > 0).exec()
 
+    def keyPressEvent(self, event):
+        if event.key() in [Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down]:
+            tools = ["select", "process", "decision", "data", "terminal", "text", "connect"]
+            if self.current_tool in tools:
+                idx = tools.index(self.current_tool)
+                if event.key() in [Qt.Key.Key_Right, Qt.Key.Key_Down]: new_idx = (idx + 1) % len(tools)
+                else: new_idx = (idx - 1) % len(tools)
+                self.set_tool(tools[new_idx]); return
+
+        super().keyPressEvent(event)
+
 if __name__ == '__main__':
     # Windowsのタスクバーでアイコンを正しく表示させるための設定
     if sys.platform == 'win32':
         import ctypes
-        myappid = 'tsukasamiyashita.flowchartcreationmiya.v1.4.1' # 任意のユニークなID
+        myappid = 'tsukasamiyashita.flowchartcreationmiya.v1.5.0' # 任意のユニークなID
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app = QApplication(sys.argv)
